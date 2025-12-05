@@ -1,13 +1,14 @@
 import React, { useState } from 'react';
-import { Activity, Menu, X, BarChart3 } from 'lucide-react';
+import { Activity, Menu, X, BarChart3, CalendarRange, ChevronDown } from 'lucide-react';
 import { FileUploader } from './components/FileUploader';
 import { Dashboard } from './components/Dashboard';
-import { parseExcelToSnapshots, reconcileSnapshots, generateMonthlyReports } from './services/excelParser';
-import { MonthlyReport, PatientSnapshot } from './types';
+import { parseExcelToSnapshots, reconcileSnapshots, generateMonthlyReports, generateReportForPeriod } from './services/excelParser';
+import { AnalysisReport, PatientSnapshot, Patient } from './types';
 
 export default function App() {
-  const [reports, setReports] = useState<MonthlyReport[]>([]);
-  const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
+  const [reports, setReports] = useState<AnalysisReport[]>([]); // Monthly reports
+  const [unifiedEvents, setUnifiedEvents] = useState<Patient[]>([]); // All events consolidated
+  const [selectedReport, setSelectedReport] = useState<AnalysisReport | null>(null);
   
   // Data Lake: Store all raw snapshots from all files
   const [allSnapshots, setAllSnapshots] = useState<PatientSnapshot[]>([]);
@@ -16,11 +17,14 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
+  // Analysis Inputs
+  const [customStartMonth, setCustomStartMonth] = useState('');
+  const [customEndMonth, setCustomEndMonth] = useState('');
+
   const handleFileUpload = async (files: File[]) => {
     setLoading(true);
     setError(null);
     try {
-      // 1. Parse new files into snapshots
       const newSnapshotsArrays = await Promise.all(files.map(file => parseExcelToSnapshots(file)));
       const newSnapshots = newSnapshotsArrays.flat();
       
@@ -28,24 +32,18 @@ export default function App() {
         throw new Error("No se encontraron datos válidos en los archivos.");
       }
 
-      // 2. Append to Data Lake
-      // We combine old and new. 
-      // Note: Real-world app might need deduplication if same file uploaded twice.
-      // For now, we trust the append or could filter by sourceFile if needed.
       const updatedSnapshots = [...allSnapshots, ...newSnapshots];
       setAllSnapshots(updatedSnapshots);
 
-      // 3. Reconcile ALL data to build unified patient timelines
-      const unifiedEvents = reconcileSnapshots(updatedSnapshots);
+      const events = reconcileSnapshots(updatedSnapshots);
+      setUnifiedEvents(events);
 
-      // 4. Generate Reports from Unified Events
-      const generatedReports = generateMonthlyReports(unifiedEvents);
-
+      const generatedReports = generateMonthlyReports(events);
       setReports(generatedReports);
 
-      // Select the most recent report if none selected
-      if (!selectedReportId && generatedReports.length > 0) {
-        setSelectedReportId(generatedReports[generatedReports.length - 1].id);
+      // Select latest monthly report by default
+      if (!selectedReport && generatedReports.length > 0) {
+        setSelectedReport(generatedReports[generatedReports.length - 1]);
       }
     } catch (err: any) {
       console.error(err);
@@ -55,17 +53,59 @@ export default function App() {
     }
   };
 
-  const selectedReport = reports.find(r => r.id === selectedReportId);
+  // --- ANALYSIS GENERATORS ---
+
+  const generateYearReport = (year: number) => {
+    const start = new Date(year, 0, 1);
+    const end = new Date(year, 11, 31);
+    const report = generateReportForPeriod(unifiedEvents, `Anual ${year}`, start, end);
+    if (report) setSelectedReport(report);
+  };
+
+  const generateQuarterReport = (year: number, quarter: number) => {
+    // Q1: 0-2, Q2: 3-5, Q3: 6-8, Q4: 9-11
+    const startMonth = (quarter - 1) * 3;
+    const endMonth = startMonth + 3;
+    const start = new Date(year, startMonth, 1);
+    const end = new Date(year, endMonth, 0); // Last day of prev month (so we use endMonth which is next q start, day 0)
+    
+    const report = generateReportForPeriod(unifiedEvents, `Q${quarter} ${year}`, start, end);
+    if (report) setSelectedReport(report);
+  };
+
+  const generateCustomRange = () => {
+    if (!customStartMonth || !customEndMonth) return;
+    
+    // Inputs are YYYY-MM
+    const [y1, m1] = customStartMonth.split('-').map(Number);
+    const [y2, m2] = customEndMonth.split('-').map(Number);
+    
+    const start = new Date(y1, m1 - 1, 1);
+    const end = new Date(y2, m2, 0); // Last day of m2
+
+    if (start > end) {
+        setError("La fecha de inicio debe ser anterior a la de fin.");
+        return;
+    }
+    
+    const report = generateReportForPeriod(unifiedEvents, `Periodo Personalizado`, start, end);
+    if (report) setSelectedReport(report);
+    else setError("No hay datos para el periodo seleccionado.");
+  };
+
+  // Determine available years from data
+  const years = Array.from<number>(new Set(unifiedEvents.map(e => e.firstSeen.getFullYear()))).sort((a, b) => b - a);
+  const currentYear = years.length > 0 ? years[0] : new Date().getFullYear();
 
   return (
     <div className="min-h-screen bg-slate-50 flex font-sans">
       {/* Sidebar - Desktop */}
       <aside className={`
-        fixed inset-y-0 left-0 z-50 w-64 bg-slate-900 text-white transform transition-transform duration-300 ease-in-out shadow-xl
+        fixed inset-y-0 left-0 z-50 w-72 bg-slate-900 text-white transform transition-transform duration-300 ease-in-out shadow-xl flex flex-col
         ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
         lg:relative lg:translate-x-0
       `}>
-        <div className="p-6 border-b border-slate-800 flex justify-between items-center">
+        <div className="p-6 border-b border-slate-800 flex justify-between items-center flex-shrink-0">
           <div className="flex items-center gap-3">
             <div className="bg-blue-600 p-2 rounded-lg">
                <Activity className="h-6 w-6 text-white" />
@@ -80,32 +120,99 @@ export default function App() {
           </button>
         </div>
 
-        <nav className="p-4 space-y-2">
-          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-4 px-2">Reportes Generados</div>
-          
-          {reports.length === 0 && (
-            <div className="px-2 py-4 text-sm text-slate-600 italic text-center border border-dashed border-slate-700 rounded-lg">
-              No hay datos. Carga archivos Excel.
+        <nav className="p-4 space-y-6 flex-1 overflow-y-auto">
+          {/* Monthly Reports */}
+          <div>
+            <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 px-2">Mensuales</div>
+            <div className="space-y-1">
+              {reports.length === 0 && (
+                <div className="px-2 py-3 text-sm text-slate-600 italic border border-dashed border-slate-700 rounded-lg">
+                  Sin datos. Carga Excel.
+                </div>
+              )}
+              {reports.map(report => (
+                <button
+                  key={report.id}
+                  onClick={() => setSelectedReport(report)}
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                    selectedReport?.id === report.id 
+                      ? 'bg-blue-600 text-white shadow-md' 
+                      : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                  }`}
+                >
+                  <BarChart3 size={16} />
+                  {report.title}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Advanced Analysis */}
+          {unifiedEvents.length > 0 && (
+            <div>
+              <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 px-2 border-t border-slate-800 pt-4">
+                Análisis Agregado
+              </div>
+              
+              <div className="space-y-1">
+                 {years.map(year => (
+                    <div key={year} className="space-y-1">
+                       <button
+                          onClick={() => generateYearReport(year)}
+                          className="w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg text-sm text-slate-300 hover:bg-slate-800 hover:text-white"
+                       >
+                         <span className="flex items-center gap-2"><CalendarRange size={16} /> Anual {year}</span>
+                       </button>
+                       <div className="grid grid-cols-4 gap-1 px-2">
+                          {[1,2,3,4].map(q => (
+                             <button 
+                               key={q}
+                               onClick={() => generateQuarterReport(year, q)}
+                               className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 py-1 rounded"
+                             >
+                               Q{q}
+                             </button>
+                          ))}
+                       </div>
+                    </div>
+                 ))}
+              </div>
+
+              {/* Custom Range */}
+              <div className="mt-4 px-2 space-y-2 bg-slate-800/50 p-3 rounded-lg">
+                <p className="text-xs text-slate-400 font-medium mb-2">Rango Personalizado</p>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-[10px] text-slate-500 block mb-0.5">Inicio</label>
+                    <input 
+                      type="month" 
+                      className="w-full bg-slate-700 border-none text-white text-xs rounded px-2 py-1"
+                      value={customStartMonth}
+                      onChange={e => setCustomStartMonth(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-500 block mb-0.5">Fin</label>
+                    <input 
+                      type="month" 
+                      className="w-full bg-slate-700 border-none text-white text-xs rounded px-2 py-1"
+                      value={customEndMonth}
+                      onChange={e => setCustomEndMonth(e.target.value)}
+                    />
+                  </div>
+                </div>
+                <button 
+                  onClick={generateCustomRange}
+                  className="w-full mt-2 bg-slate-700 hover:bg-blue-600 text-white text-xs py-1.5 rounded transition-colors"
+                >
+                  Generar Reporte
+                </button>
+              </div>
             </div>
           )}
-
-          {reports.map(report => (
-            <button
-              key={report.id}
-              onClick={() => setSelectedReportId(report.id)}
-              className={`w-full flex items-center gap-3 px-3 py-3 rounded-lg text-sm font-medium transition-all ${
-                selectedReportId === report.id 
-                  ? 'bg-blue-600 text-white shadow-md' 
-                  : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-              }`}
-            >
-              <BarChart3 size={18} />
-              {report.monthName}
-            </button>
-          ))}
         </nav>
 
-        <div className="absolute bottom-0 w-full p-4 border-t border-slate-800">
+        <div className="p-4 border-t border-slate-800">
            <div className="flex items-center gap-3 text-xs text-slate-500">
              <div className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center">
                <span className="font-bold text-slate-300">DO</span>

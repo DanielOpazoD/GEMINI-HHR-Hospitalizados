@@ -1,5 +1,6 @@
+
 import * as XLSX from 'xlsx';
-import { Patient, DailyStats, MonthlyReport, PatientSnapshot } from '../types';
+import { Patient, DailyStats, AnalysisReport, PatientSnapshot } from '../types';
 
 // --- HELPERS ---
 
@@ -82,26 +83,39 @@ const parseExcelDate = (excelDate: any, context: { year: number, month: number |
       year = context.year;
     }
 
-    // DISAMBIGUATION
+    // DISAMBIGUATION LOGIC (Fix for "01-11" confusion)
+    // If context month is set, we force the matching number to be the month.
     if (context.month !== null) {
-      if (parts.p2 === context.month + 1) {
-        day = parts.p1;
-        month = parts.p2 - 1;
-      } else if (parts.p1 === context.month + 1) {
-        day = parts.p2;
-        month = parts.p1 - 1;
-      } else {
-        day = parts.p1;
-        month = parts.p2 - 1;
-      }
+        // Javascript months are 0-11. Parts are 1-12.
+        const contextMonthVal = context.month + 1;
+        
+        // Case 1: p2 matches context month (Standard DD-MM)
+        if (parts.p2 === contextMonthVal) {
+            day = parts.p1;
+            month = parts.p2 - 1;
+        } 
+        // Case 2: p1 matches context month (US Format MM-DD) - rare but possible
+        else if (parts.p1 === contextMonthVal) {
+            day = parts.p2;
+            month = parts.p1 - 1;
+        }
+        // Case 3: Neither matches context.
+        // If context is strong (from filename), we trust context year, but what about month?
+        // We fallback to standard DD-MM-YYYY
+        else {
+             day = parts.p1;
+             month = parts.p2 - 1;
+        }
     } else {
-      day = parts.p1;
-      month = parts.p2 - 1;
+        // No context? Standard DD-MM
+        day = parts.p1;
+        month = parts.p2 - 1;
     }
 
     const date = new Date(year, month, day);
-    if (date.getMonth() !== month) return null; // Invalid date rollover check
-
+    // Basic validation
+    if (date.getMonth() !== month) return null; 
+    
     return date;
   }
   return null;
@@ -137,12 +151,14 @@ export const parseExcelToSnapshots = async (file: File): Promise<PatientSnapshot
         const yearCounts: Record<number, number> = {};
         const monthCounts: Record<number, number> = {};
         
+        // Scan for explicit years in sheet names to help context
         sheetNames.forEach(name => {
             const parts = extractDateParts(name);
             if (parts && parts.p3 !== null) {
                 let y = parts.p3;
                 if (y < 100) y += 2000;
                 yearCounts[y] = (yearCounts[y] || 0) + 1;
+                // Also count months if they are explicit
                 const m = parts.p2 - 1;
                 if (m >= 0 && m <= 11) {
                     monthCounts[m] = (monthCounts[m] || 0) + 1;
@@ -159,6 +175,8 @@ export const parseExcelToSnapshots = async (file: File): Promise<PatientSnapshot
             }
         });
 
+        // Resolve Dominant Month (Context)
+        // Priority: Filename > Most Frequent Month in Sheets
         let dominantMonth = fileContext.month;
         if (dominantMonth === null) {
             let maxMonthCount = 0;
@@ -194,6 +212,7 @@ export const parseExcelToSnapshots = async (file: File): Promise<PatientSnapshot
                 const row = jsonData[i];
                 const rowStr = row.join(' ').toUpperCase();
 
+                // Block Detection
                 if (rowStr.includes('ALTAS') && rowStr.length < 50) { 
                     currentBlock = 'DISCHARGED';
                     continue;
@@ -223,6 +242,14 @@ export const parseExcelToSnapshots = async (file: File): Promise<PatientSnapshot
                     const nameRaw = row[colMap['NAME']];
                     const diagRaw = row[colMap['DIAG']] ? String(row[colMap['DIAG']]).trim() : '';
 
+                    // --- CRITICAL FIX: Ghost Header Detection ---
+                    // If the row contains "NOMBRE" in the Name column or "RUT" in the RUT column, it's a repeated header.
+                    const nameCheck = String(nameRaw || '').toUpperCase().trim();
+                    const rutCheck = String(rutRaw || '').toUpperCase().trim();
+                    if (nameCheck === 'NOMBRE' || nameCheck.includes('NOMBRE DEL PACIENTE') || rutCheck === 'RUT') {
+                        continue;
+                    }
+
                     // --- FILTERING RULES ---
                     const nameNorm = normalizeName(String(nameRaw || ''));
                     
@@ -236,14 +263,15 @@ export const parseExcelToSnapshots = async (file: File): Promise<PatientSnapshot
                     const rutClean = cleanRut(rutRaw);
                     if (!rutClean && !diagRaw) continue;
 
+                    // Bed Type Normalization
                     let rawBedType = row[colMap['BEDTYPE']] ? String(row[colMap['BEDTYPE']]).trim().toUpperCase() : 'INDEFINIDO';
                     if (rawBedType === 'C.M.A' || rawBedType === 'C.M.A.' || rawBedType.includes('MAYOR AMBULATORIA')) rawBedType = 'CMA';
                     if (rawBedType === 'MEDIA' || rawBedType === 'CAMA MEDIA' || rawBedType === 'MEDIO') rawBedType = 'MEDIA';
 
                     snapshots.push({
                         date: currentDate,
-                        rut: rutClean, // Can be empty if relying on name matching later
-                        name: String(nameRaw).trim(), // Keep original casing for display, normalize for logic
+                        rut: rutClean, 
+                        name: String(nameRaw).trim(), 
                         diagnosis: diagRaw,
                         bedType: rawBedType,
                         isUPC: isUPC(row[colMap['UPC']]),
@@ -268,49 +296,31 @@ export const parseExcelToSnapshots = async (file: File): Promise<PatientSnapshot
 // --- STAGE 2: RECONCILE SNAPSHOTS (UNIFIED TIMELINE) ---
 
 export const reconcileSnapshots = (snapshots: PatientSnapshot[]): Patient[] => {
-    // 1. Sort all snapshots chronologically
     const sorted = [...snapshots].sort((a, b) => a.date.getTime() - b.date.getTime());
-
-    // 2. Identify all covered dates in the dataset (to determine implicit discharges)
-    // We map dateStr -> boolean
     const coveredDates = new Set<string>();
     sorted.forEach(s => coveredDates.add(s.date.toISOString().split('T')[0]));
 
-    // 3. Group snapshots by unique Patient Identity
-    // Priority: RUT. If no RUT, use Normalized Name.
+    // Group Priority: RUT > Normalized Name
     const patientGroups = new Map<string, PatientSnapshot[]>();
-
     sorted.forEach(s => {
         let key = s.rut;
         if (!key || key === 'SIN-RUT') {
             key = 'NAME-' + normalizeName(s.name);
         }
-        
-        if (!patientGroups.has(key)) {
-            patientGroups.set(key, []);
-        }
+        if (!patientGroups.has(key)) patientGroups.set(key, []);
         patientGroups.get(key)!.push(s);
     });
 
     const events: Patient[] = [];
 
-    // 4. Process each patient's timeline to create Events
     patientGroups.forEach((patientSnaps, patientKey) => {
-        // Ensure chronological order for this patient
         patientSnaps.sort((a, b) => a.date.getTime() - b.date.getTime());
-
         let currentEvent: Patient | null = null;
 
         for (let i = 0; i < patientSnaps.length; i++) {
             const snap = patientSnaps[i];
             const snapDateStr = snap.date.toISOString().split('T')[0];
             
-            // Check if we should start a new event
-            // A new event is needed if:
-            // - No current event
-            // - Gap in dates > 1 day AND the intermediate day WAS covered by dataset (implicit discharge)
-            // - Previous event was explicitly closed (Alta/Traslado)
-
             let isGap = false;
             if (currentEvent) {
                 const lastDate = currentEvent.lastSeen;
@@ -318,51 +328,33 @@ export const reconcileSnapshots = (snapshots: PatientSnapshot[]): Patient[] => {
                 const diffDays = Math.round(diffTime / (1000 * 3600 * 24));
                 
                 if (diffDays > 1) {
-                    // Check if the gap days were actually monitored (covered)
-                    // If we have data for the missing days, it means patient was gone -> Discharge.
-                    // If we DON'T have data (e.g. missing file), assume continuity? 
-                    // Prompt says: "Aquel dia que no aparece debe ser considerado el dia de alta".
-                    // This implies if we have coverage and they are missing, they are out.
-                    
-                    // We check if the day immediately following 'lastSeen' is covered.
                     const dayAfterLast = new Date(lastDate);
                     dayAfterLast.setDate(dayAfterLast.getDate() + 1);
                     const dayAfterStr = dayAfterLast.toISOString().split('T')[0];
 
                     if (coveredDates.has(dayAfterStr)) {
-                        isGap = true; // They were missing on a covered day
+                        isGap = true; 
                     } else {
-                         // Missing data gap (e.g. uploaded Jan then Mar). 
-                         // Usually we should break, but if user uploads consecutive months, this handles it.
-                         // If gap is huge (>30 days), force break? Let's assume strict continuity only if days are close.
-                         // For safety, if diff > 5 days, break event.
                          if (diffDays > 5) isGap = true;
                     }
                 }
             }
 
             if (!currentEvent || isGap || (currentEvent.status !== 'Hospitalizado')) {
-                // Finalize previous if exists and wasn't closed
                 if (currentEvent && isGap && currentEvent.status === 'Hospitalizado') {
-                    // Implicit discharge on the first missing day
                     const implicitDischargeDate = new Date(currentEvent.lastSeen);
                     implicitDischargeDate.setDate(implicitDischargeDate.getDate() + 1);
                     currentEvent.dischargeDate = implicitDischargeDate;
                     currentEvent.status = 'Alta';
-                    // Calc LOS
                     const diff = Math.ceil((implicitDischargeDate.getTime() - currentEvent.firstSeen.getTime()) / (86400000));
                     currentEvent.los = diff || 1;
                 }
 
-                // Start NEW Event
-                // If this snapshot is 'DISCHARGED' or 'TRANSFERRED', it might be a dangling record or same-day discharge.
-                // We treat it as a 1-day event if it's the start.
-                
                 currentEvent = {
                     id: `${patientKey}-${snapDateStr}`,
                     rut: snap.rut || '',
                     name: snap.name,
-                    age: 0, // Age not always in snapshot, could update if found
+                    age: 0, 
                     diagnosis: snap.diagnosis,
                     bedType: snap.bedType,
                     isUPC: snap.isUPC,
@@ -375,23 +367,27 @@ export const reconcileSnapshots = (snapshots: PatientSnapshot[]): Patient[] => {
                 };
                 events.push(currentEvent);
             } else {
-                // Continue EXISTING Event
                 currentEvent.lastSeen = snap.date;
                 currentEvent.history.push(snapDateStr);
                 
-                // Update dynamic fields
                 currentEvent.bedType = snap.bedType || currentEvent.bedType;
-                currentEvent.isUPC = snap.isUPC; // current status
+                currentEvent.isUPC = snap.isUPC; 
                 if (snap.isUPC) currentEvent.wasEverUPC = true;
                 
-                // Update Diagnosis (longest wins)
                 if (snap.diagnosis && snap.diagnosis.length > (currentEvent.diagnosis || '').length) {
                     currentEvent.diagnosis = snap.diagnosis;
                 }
             }
 
-            // Handle Explicit Status in Snapshot
             if (snap.status === 'DISCHARGED') {
+                // FALLBACK: If explicit discharge but we don't know when they left (missing dates),
+                // we use the current snapshot date. But per requirement, if they disappear, it's discharge.
+                // If they are in the "Altas" list, the discharge date is valid.
+                
+                // Logic update: If present in 'DISCHARGED' block, use lastSeen as discharge date?
+                // Or use the date of the sheet? 
+                // Previous fix: "lastSeen" from logic. But here snap.date IS the sheet date.
+                // If patient appears in ALTAS list on day X. It means they were discharged on Day X.
                 currentEvent.dischargeDate = snap.date;
                 currentEvent.status = 'Alta';
             } else if (snap.status === 'TRANSFERRED') {
@@ -400,8 +396,6 @@ export const reconcileSnapshots = (snapshots: PatientSnapshot[]): Patient[] => {
             }
         }
 
-        // After loop, finalize the last event if still open
-        // Check if the day after lastSeen is covered. If so, implicit discharge.
         if (currentEvent && currentEvent.status === 'Hospitalizado') {
             const dayAfterLast = new Date(currentEvent.lastSeen);
             dayAfterLast.setDate(dayAfterLast.getDate() + 1);
@@ -411,10 +405,8 @@ export const reconcileSnapshots = (snapshots: PatientSnapshot[]): Patient[] => {
                 currentEvent.dischargeDate = dayAfterLast;
                 currentEvent.status = 'Alta';
             }
-            // Else: Patient is still hospitalized at the end of the provided data
         }
 
-        // Finalize LOS for all events of this patient
         events.filter(e => e.rut === patientKey || `NAME-${normalizeName(e.name)}` === patientKey).forEach(e => {
              let end = e.lastSeen;
              if (e.dischargeDate) end = e.dischargeDate;
@@ -428,14 +420,113 @@ export const reconcileSnapshots = (snapshots: PatientSnapshot[]): Patient[] => {
     return events;
 };
 
-// --- STAGE 3: GENERATE REPORTS FROM EVENTS ---
+// --- STAGE 3: GENERATE REPORTS ---
 
-export const generateMonthlyReports = (events: Patient[]): MonthlyReport[] => {
-    // 1. Determine Date Range of Data
+// Helper for generating a report for any given period
+export const generateReportForPeriod = (events: Patient[], title: string, start: Date, end: Date): AnalysisReport | null => {
+    
+    // Filter events active in this period
+    // Active if: EventStart <= EndDate AND EventEnd >= StartDate
+    const activeEvents = events.filter(e => {
+        let eventEnd = e.lastSeen;
+        if (e.dischargeDate && e.dischargeDate > eventEnd) eventEnd = e.dischargeDate;
+        if (e.transferDate && e.transferDate > eventEnd) eventEnd = e.transferDate;
+        
+        return e.firstSeen <= end && eventEnd >= start;
+    });
+
+    if (activeEvents.length === 0) return null;
+
+    const dailyStatsMap = new Map<string, DailyStats>();
+    
+    // Iterate every day in the range
+    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+        if (d > new Date()) break;
+        const dateStr = d.toISOString().split('T')[0];
+        
+        dailyStatsMap.set(dateStr, {
+            date: dateStr,
+            totalOccupancy: 0,
+            upcOccupancy: 0,
+            nonUpcOccupancy: 0,
+            admissions: 0,
+            discharges: 0,
+            transfers: 0
+        });
+    }
+
+    activeEvents.forEach(e => {
+        // Count Admissions
+        if (e.firstSeen >= start && e.firstSeen <= end) {
+            const admitStr = e.firstSeen.toISOString().split('T')[0];
+            if (dailyStatsMap.has(admitStr)) dailyStatsMap.get(admitStr)!.admissions++;
+        }
+
+        // Count Discharges
+        if (e.dischargeDate && e.dischargeDate >= start && e.dischargeDate <= end) {
+            const disStr = e.dischargeDate.toISOString().split('T')[0];
+            if (dailyStatsMap.has(disStr)) dailyStatsMap.get(disStr)!.discharges++;
+        }
+        // Count Transfers
+        if (e.transferDate && e.transferDate >= start && e.transferDate <= end) {
+            const transStr = e.transferDate.toISOString().split('T')[0];
+            if (dailyStatsMap.has(transStr)) dailyStatsMap.get(transStr)!.transfers++;
+        }
+
+        // Count Occupancy based on History
+        e.history.forEach(hDateStr => {
+            const hDate = new Date(hDateStr);
+            if (hDate >= start && hDate <= end && dailyStatsMap.has(hDateStr)) {
+                 const stat = dailyStatsMap.get(hDateStr)!;
+                 stat.totalOccupancy++;
+                 if (e.isUPC) stat.upcOccupancy++;
+                 else stat.nonUpcOccupancy++;
+            }
+        });
+    });
+
+    const validStats = Array.from(dailyStatsMap.values())
+        .filter(d => d.totalOccupancy > 0 || d.admissions > 0 || d.discharges > 0)
+        .sort((a, b) => a.date.localeCompare(b.date));
+
+    // Stats Aggregation
+    const totalAdm = activeEvents.filter(e => e.firstSeen >= start && e.firstSeen <= end).length;
+    const totalDis = validStats.reduce((acc, curr) => acc + curr.discharges, 0);
+    
+    const uniqueUPC = new Set<string>();
+    activeEvents.forEach(p => {
+        if (p.wasEverUPC) uniqueUPC.add(p.rut || p.name);
+    });
+
+    // Avg LOS for patients DISCHARGED in this period
+    const dischargedInPeriod = activeEvents.filter(e => {
+        let evEnd = e.dischargeDate || e.transferDate;
+        return evEnd && evEnd >= start && evEnd <= end;
+    });
+    
+    const losSum = dischargedInPeriod.reduce((acc, curr) => acc + curr.los, 0);
+    const avgLOS = dischargedInPeriod.length > 0 ? parseFloat((losSum / dischargedInPeriod.length).toFixed(1)) : 0;
+
+    return {
+        id: `REPORT-${title}-${Date.now()}`,
+        title,
+        startDate: start,
+        endDate: end,
+        patients: activeEvents,
+        dailyStats: validStats,
+        totalAdmissions: totalAdm,
+        totalDischarges: totalDis,
+        totalUpcPatients: uniqueUPC.size,
+        avgLOS,
+        occupancyRate: 0
+    };
+};
+
+export const generateMonthlyReports = (events: Patient[]): AnalysisReport[] => {
+    if (events.length === 0) return [];
+
     let minDate = new Date(8640000000000000);
     let maxDate = new Date(-8640000000000000);
-
-    if (events.length === 0) return [];
 
     events.forEach(e => {
         if (e.firstSeen < minDate) minDate = e.firstSeen;
@@ -444,145 +535,19 @@ export const generateMonthlyReports = (events: Patient[]): MonthlyReport[] => {
         if (end > maxDate) maxDate = end;
     });
 
-    // 2. Iterate Months
-    const reports: MonthlyReport[] = [];
+    const reports: AnalysisReport[] = [];
     const currentIter = new Date(minDate.getFullYear(), minDate.getMonth(), 1);
     
-    // Safety break
-    while (currentIter <= maxDate && reports.length < 36) { // Max 3 years processed
+    while (currentIter <= maxDate && reports.length < 36) { 
         const monthStart = new Date(currentIter.getFullYear(), currentIter.getMonth(), 1);
-        const monthEnd = new Date(currentIter.getFullYear(), currentIter.getMonth() + 1, 0); // Last day of month
+        const monthEnd = new Date(currentIter.getFullYear(), currentIter.getMonth() + 1, 0);
         
-        // Filter events active in this month
-        // Active if: EventStart <= MonthEnd AND EventEnd >= MonthStart
-        const activeEvents = events.filter(e => {
-            let end = e.lastSeen;
-            if (e.dischargeDate) end = e.dischargeDate;
-            if (e.transferDate) end = e.transferDate;
-            
-            return e.firstSeen <= monthEnd && end >= monthStart;
-        });
+        const monthNameStr = monthStart.toLocaleString('es-ES', { month: 'long', year: 'numeric' });
+        const title = monthNameStr.charAt(0).toUpperCase() + monthNameStr.slice(1);
 
-        // If no data for this month, skip
-        if (activeEvents.length === 0) {
-            currentIter.setMonth(currentIter.getMonth() + 1);
-            continue;
-        }
-
-        // Generate Daily Stats for this month
-        const dailyStatsMap = new Map<string, DailyStats>();
-        
-        // Pre-fill days of month
-        const daysInMonth = monthEnd.getDate();
-        for (let d = 1; d <= daysInMonth; d++) {
-            const dateObj = new Date(monthStart.getFullYear(), monthStart.getMonth(), d);
-            if (dateObj > new Date()) break; // Don't project future
-            const dateStr = dateObj.toISOString().split('T')[0];
-            
-            // Optimization: check if we actually have data for this date in the raw snapshots?
-            // Indirectly we do via events history.
-            
-            dailyStatsMap.set(dateStr, {
-                date: dateStr,
-                totalOccupancy: 0,
-                upcOccupancy: 0,
-                nonUpcOccupancy: 0,
-                admissions: 0,
-                discharges: 0,
-                transfers: 0
-            });
-        }
-
-        activeEvents.forEach(e => {
-            // Count Admissions in this month
-            const admitStr = e.firstSeen.toISOString().split('T')[0];
-            if (dailyStatsMap.has(admitStr)) {
-                dailyStatsMap.get(admitStr)!.admissions++;
-            }
-
-            // Count Discharges/Transfers in this month
-            if (e.dischargeDate) {
-                const disStr = e.dischargeDate.toISOString().split('T')[0];
-                if (dailyStatsMap.has(disStr)) dailyStatsMap.get(disStr)!.discharges++;
-            }
-            if (e.transferDate) {
-                const transStr = e.transferDate.toISOString().split('T')[0];
-                if (dailyStatsMap.has(transStr)) dailyStatsMap.get(transStr)!.transfers++;
-            }
-
-            // Count Occupancy
-            // Iterate days the patient was present
-            // We use the patient's history array, but that might be sparse if we only have snapshots.
-            // Better: Iterate valid days of the event that fall in this month.
-            
-            let scanDate = new Date(e.firstSeen);
-            // Cap start at month start
-            if (scanDate < monthStart) scanDate = new Date(monthStart);
-
-            let endDate = e.lastSeen; // Occupancy is until last seen (inclusive usually)
-            // But if discharged, they are NOT occupying on the discharge date?
-            // Usually bed census is taken at X hour. If patient is in census, they occupy.
-            // Our snapshots represent the census. So we use the history array logic or range.
-            // Since we have history of specific dates seen, let's use that for exact occupancy.
-            
-            e.history.forEach(hDateStr => {
-                if (dailyStatsMap.has(hDateStr)) {
-                    const stat = dailyStatsMap.get(hDateStr)!;
-                    stat.totalOccupancy++;
-                    // Note: isUPC in event is "current". Historic UPC status might differ per day.
-                    // But in our simplified event model, we might just use the event's flag or need granular history.
-                    // For now, use event's current flag as approximation or we'd need granular history in Event.
-                    // Refinement: PatientSnapshot had isUPC. We lost that granularity in Event object (it only has current).
-                    // Correct approach: We should re-check snapshots for accurate daily UPC counts, 
-                    // but for now let's use the event property as best effort or re-architect Event to have daily details.
-                    // Given constraints, we use event.isUPC. 
-                    if (e.isUPC) stat.upcOccupancy++;
-                    else stat.nonUpcOccupancy++;
-                }
-            });
-        });
-
-        // Filter out empty days (days with 0 occupancy and 0 movement - likely no file uploaded for that day)
-        // This prevents plotting days where we simply had no data.
-        const validStats = Array.from(dailyStatsMap.values())
-            .filter(d => d.totalOccupancy > 0 || d.admissions > 0 || d.discharges > 0)
-            .sort((a, b) => a.date.localeCompare(b.date));
-
-        if (validStats.length > 0) {
-            // Calculate Aggregates
-            const monthNameStr = monthStart.toLocaleString('es-ES', { month: 'long', year: 'numeric' });
-            const monthName = monthNameStr.charAt(0).toUpperCase() + monthNameStr.slice(1);
-            
-            const totalAdm = activeEvents.filter(e => e.firstSeen >= monthStart && e.firstSeen <= monthEnd).length;
-            const totalDis = validStats.reduce((acc, curr) => acc + curr.discharges, 0);
-            
-            // Unique UPC
-            const uniqueUPC = new Set<string>();
-            activeEvents.forEach(p => {
-                if (p.wasEverUPC) uniqueUPC.add(p.rut || p.name);
-            });
-
-            // Avg LOS of events ENDING in this month? Or all active?
-            // Usually LOS stats are for discharged patients in the period.
-            const dischargedInMonth = activeEvents.filter(e => {
-                let end = e.dischargeDate || e.transferDate;
-                return end && end >= monthStart && end <= monthEnd;
-            });
-            
-            const losSum = dischargedInMonth.reduce((acc, curr) => acc + curr.los, 0);
-            const avgLOS = dischargedInMonth.length > 0 ? parseFloat((losSum / dischargedInMonth.length).toFixed(1)) : 0;
-
-            reports.push({
-                id: `REPORT-${monthName}-${Date.now()}`,
-                monthName,
-                patients: activeEvents, // List all active, but UI can filter by Admit Date if needed
-                dailyStats: validStats,
-                totalAdmissions: totalAdm,
-                totalDischarges: totalDis,
-                totalUpcPatients: uniqueUPC.size,
-                avgLOS,
-                occupancyRate: 0
-            });
+        const report = generateReportForPeriod(events, title, monthStart, monthEnd);
+        if (report) {
+            reports.push(report);
         }
 
         currentIter.setMonth(currentIter.getMonth() + 1);

@@ -1,14 +1,15 @@
+
 import React, { useMemo, useState } from 'react';
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
   BarChart, Bar, PieChart, Pie, Cell
 } from 'recharts';
 import { Users, Activity, LogOut, Clock, Filter, Download, HeartPulse, X } from 'lucide-react';
-import { MonthlyReport, Patient } from '../types';
+import { AnalysisReport, Patient } from '../types';
 import * as XLSX from 'xlsx';
 
 interface DashboardProps {
-  report: MonthlyReport;
+  report: AnalysisReport;
 }
 
 // Consistent colors for specific bed types
@@ -31,8 +32,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
   const [showUpcModal, setShowUpcModal] = useState(false);
 
   // KPIS
-  const maxOccupancy = Math.max(...report.dailyStats.map(d => d.totalOccupancy));
-  const avgOccupancy = Math.round(report.dailyStats.reduce((acc, curr) => acc + curr.totalOccupancy, 0) / report.dailyStats.length) || 0;
+  const maxOccupancy = report.dailyStats.length > 0 ? Math.max(...report.dailyStats.map(d => d.totalOccupancy)) : 0;
+  const avgOccupancy = report.dailyStats.length > 0 ? Math.round(report.dailyStats.reduce((acc, curr) => acc + curr.totalOccupancy, 0) / report.dailyStats.length) : 0;
   
   // Pie Chart Data
   const bedTypeDist = useMemo(() => {
@@ -70,7 +71,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
     const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Pacientes_Eventos");
-    XLSX.writeFile(wb, `Reporte_${report.monthName}.xlsx`);
+    XLSX.writeFile(wb, `Reporte_${report.title.replace(/\s+/g, '_')}.xlsx`);
   };
 
   const filteredPatients = useMemo(() => {
@@ -88,8 +89,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
       {/* Header Actions */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
-          <h2 className="text-2xl font-bold text-gray-900">{report.monthName}</h2>
-          <p className="text-gray-500 text-sm">Resumen estadístico mensual</p>
+          <h2 className="text-2xl font-bold text-gray-900">{report.title}</h2>
+          <p className="text-gray-500 text-sm">
+            {report.startDate.toLocaleDateString()} — {report.endDate.toLocaleDateString()}
+          </p>
         </div>
         <div className="flex gap-2">
           <div className="bg-white p-1 rounded-lg border border-gray-200 flex">
@@ -146,12 +149,17 @@ export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
                     <XAxis 
                       dataKey="date" 
-                      tickFormatter={(str) => new Date(str).getDate().toString()} 
+                      tickFormatter={(str) => {
+                          const d = new Date(str);
+                          return `${d.getDate()}/${d.getMonth()+1}`;
+                      }} 
                       stroke="#94a3b8"
                       tick={{fontSize: 12}}
+                      minTickGap={30}
                     />
                     <YAxis stroke="#94a3b8" tick={{fontSize: 12}} />
                     <Tooltip 
+                      labelFormatter={(str) => new Date(str).toLocaleDateString()}
                       contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}}
                     />
                     <Legend />
@@ -200,12 +208,20 @@ export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
                   <XAxis 
                     dataKey="date" 
-                    tickFormatter={(str) => new Date(str).getDate().toString()} 
+                    tickFormatter={(str) => {
+                        const d = new Date(str);
+                        return `${d.getDate()}/${d.getMonth()+1}`;
+                    }} 
                     stroke="#94a3b8"
                     tick={{fontSize: 12}}
+                    minTickGap={30}
                   />
                   <YAxis stroke="#94a3b8" tick={{fontSize: 12}} />
-                  <Tooltip cursor={{fill: '#f8fafc'}} contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}}/>
+                  <Tooltip 
+                    cursor={{fill: '#f8fafc'}} 
+                    labelFormatter={(str) => new Date(str).toLocaleDateString()}
+                    contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}}
+                  />
                   <Legend />
                   <Bar dataKey="admissions" name="Ingresos" fill="#10b981" radius={[4, 4, 0, 0]} />
                   <Bar dataKey="discharges" name="Altas" fill="#3b82f6" radius={[4, 4, 0, 0]} />
@@ -318,7 +334,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
                    {upcPatientsList.length === 0 ? (
                       <tr>
                         <td colSpan={7} className="px-6 py-8 text-center text-gray-500 italic">
-                          No se encontraron pacientes UPC en este mes.
+                          No se encontraron pacientes UPC en este periodo.
                         </td>
                       </tr>
                    ) : (

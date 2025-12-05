@@ -1,3 +1,4 @@
+
 export interface RawRow {
   [key: string]: any;
 }
@@ -41,10 +42,12 @@ export interface DailyStats {
   transfers: number;
 }
 
-export interface MonthlyReport {
+export interface AnalysisReport {
   id: string; // Unique ID for the report
-  monthName: string; // e.g., "Noviembre 2025"
-  patients: Patient[]; // Events active in this month
+  title: string; // e.g., "Noviembre 2025" or "Q1 2025"
+  startDate: Date;
+  endDate: Date;
+  patients: Patient[]; // Events active in this period
   dailyStats: DailyStats[];
   totalAdmissions: number;
   totalDischarges: number;
