@@ -18,43 +18,63 @@ const normalizeName = (name: string): string => {
     .trim();
 };
 
-// Strict Helper to parse Excel dates focusing on DD-MM-YYYY format
-const parseExcelDate = (excelDate: any): Date | null => {
+// --- NEW DATE PARSING LOGIC ---
+
+// Helper to extract day, month, and optional year from a string
+// Returns null if no valid date pattern is found
+const extractDateParts = (str: string) => {
+  // Regex matches: 
+  // 1. Day (1-2 digits)
+  // 2. Separator (space, dot, hyphen, slash)
+  // 3. Month (1-2 digits)
+  // 4. Optional: Separator + Year (2 or 4 digits)
+  // This allows matches like "1-11", "01.11", "1/11/2025", "Sabado 1-11-25"
+  const match = str.match(/(\d{1,2})[\s.\-/]+(\d{1,2})(?:[\s.\-/]+(\d{2,4}))?/);
+  
+  if (!match) return null;
+  
+  return {
+    day: parseInt(match[1], 10),
+    month: parseInt(match[2], 10) - 1, // 0-indexed (0=Jan)
+    year: match[3] ? parseInt(match[3], 10) : null
+  };
+};
+
+// Helper to parse Excel dates focusing on DD-MM-YYYY format with context year
+const parseExcelDate = (excelDate: any, contextYear: number): Date | null => {
   if (!excelDate) return null;
   if (excelDate instanceof Date) return excelDate;
   
   // Handle Excel serial date (Number)
   if (typeof excelDate === 'number') {
-    // Excel base date logic (approximate for JS)
     return new Date(Math.round((excelDate - 25569) * 86400 * 1000));
   }
   
-  // Handle string dates strictly as DD-MM-YYYY
-  // User Requirement: "El formato es dia-mes-año"
   if (typeof excelDate === 'string') {
-    const cleanStr = excelDate.trim();
+    const parts = extractDateParts(excelDate);
+    if (!parts) return null;
+
+    if (isNaN(parts.day) || isNaN(parts.month)) return null;
+
+    let year = parts.year;
     
-    // Regex matches: (1 or 2 digits) separator (1 or 2 digits) separator (2 or 4 digits)
-    // Separators can be space, dot, hyphen, slash
-    // REMOVED anchors (^ $) to allow text like "Sabado 1-11-2025"
-    const match = cleanStr.match(/(\d{1,2})[\s.\-/]+(\d{1,2})[\s.\-/]+(\d{2,4})/);
-
-    if (match) {
-      const day = parseInt(match[1], 10);
-      const month = parseInt(match[2], 10) - 1; // Month is 0-indexed in JS (0=Jan, 3=April)
-      let year = parseInt(match[3], 10);
-
-      if (isNaN(day) || isNaN(month) || isNaN(year)) return null;
-
-      // FIX: 2-digit year handling
-      // If year is < 100, we assume it's 2000+ for this application context
-      // e.g., "25" -> 2025
-      if (year < 100) {
-        year += 2000;
-      }
-      
-      return new Date(year, month, day);
+    // If year is missing, use the dominant context year from the file
+    if (year === null) {
+        year = contextYear;
+    } else {
+        // Handle 2-digit years (e.g., 25 -> 2025)
+        if (year < 100) {
+            year += 2000;
+        }
     }
+
+    const date = new Date(year, parts.month, parts.day);
+    
+    // JS Date autocorrects invalid days (e.g. Feb 30 -> Mar 2). 
+    // We check if the month matches to ensure validity.
+    if (date.getMonth() !== parts.month) return null;
+
+    return date;
   }
   return null;
 };
@@ -103,8 +123,43 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
         const data = e.target?.result;
         const workbook = XLSX.read(data, { type: 'binary' });
         
-        // RE-ARCHITECTED LOGIC:
-        // Instead of a map of RUT -> Patient, we maintain "Active Admissions".
+        // --- STEP 1: SCAN SHEETS FOR DOMINANT YEAR ---
+        // Many sheets might lack the year (e.g. "4-11"). 
+        // We find the most frequent year across all sheets to use as default.
+        const sheetNames = workbook.SheetNames;
+        const yearCounts: Record<number, number> = {};
+        let fallbackYear = new Date().getFullYear();
+
+        sheetNames.forEach(name => {
+            const parts = extractDateParts(name);
+            if (parts && parts.year !== null) {
+                let y = parts.year;
+                if (y < 100) y += 2000;
+                yearCounts[y] = (yearCounts[y] || 0) + 1;
+            }
+        });
+
+        // Find max
+        let maxYearCount = 0;
+        let dominantYear = fallbackYear;
+        Object.entries(yearCounts).forEach(([yearStr, count]) => {
+            if (count > maxYearCount) {
+                maxYearCount = count;
+                dominantYear = parseInt(yearStr, 10);
+            }
+        });
+
+        // --- STEP 2: PARSE SHEETS AND SORT CHRONOLOGICALLY ---
+        const sheetsWithDates = sheetNames.map(name => {
+            const date = parseExcelDate(name, dominantYear);
+            return { name, date };
+        }).filter((item): item is { name: string, date: Date } => item.date !== null);
+
+        // Sort by date ascending
+        sheetsWithDates.sort((a, b) => a.date.getTime() - b.date.getTime());
+
+        // --- STEP 3: PROCESS DATA DAY BY DAY ---
+        
         // Key: Clean RUT. Value: Current Patient Object (Event).
         const activeAdmissions = new Map<string, Patient>();
         
@@ -116,20 +171,7 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
         // Track month frequency to name the report correctly (Mode)
         const monthFrequency = new Map<string, number>();
 
-        const sheetNames = workbook.SheetNames;
-        
-        // Sort sheet names by date
-        const sheetsWithDates = sheetNames.map(name => ({
-          name,
-          date: parseExcelDate(name)
-        })).filter(item => item.date !== null);
-
-        // Sort chronological
-        sheetsWithDates.sort((a, b) => a.date!.getTime() - b.date!.getTime());
-
         sheetsWithDates.forEach(({ name: sheetName, date: currentDate }) => {
-          if (!currentDate) return; 
-
           // Tally month/year for report naming
           const monthKey = `${currentDate.getFullYear()}-${currentDate.getMonth()}`;
           monthFrequency.set(monthKey, (monthFrequency.get(monthKey) || 0) + 1);
@@ -347,8 +389,6 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
                  activeAdmissions.delete(key);
                  
                  // Optional: Increment discharge count for stats?
-                 // The prompt doesn't explicitly say to count implicit discharges in the daily stats bar chart,
-                 // but usually, if they left, it's a discharge. Let's count it for consistency in numbers.
                  dailyStat.discharges++;
                }
             }
@@ -413,11 +453,11 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
         // Month name Calculation (MODE)
         // Find the most frequent month/year in the sheets to name the report
         let bestMonthKey = "";
-        let maxCount = 0;
+        let maxMonthCount = 0;
         
         monthFrequency.forEach((count, key) => {
-            if (count > maxCount) {
-                maxCount = count;
+            if (count > maxMonthCount) {
+                maxMonthCount = count;
                 bestMonthKey = key;
             }
         });
