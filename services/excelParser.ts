@@ -36,8 +36,8 @@ const parseExcelDate = (excelDate: any): Date | null => {
     
     // Regex matches: (1 or 2 digits) separator (1 or 2 digits) separator (2 or 4 digits)
     // Separators can be space, dot, hyphen, slash
-    // Group 1: Day, Group 2: Month, Group 3: Year
-    const match = cleanStr.match(/^(\d{1,2})[\s.\-/]+(\d{1,2})[\s.\-/]+(\d{2,4})$/);
+    // REMOVED anchors (^ $) to allow text like "Sabado 1-11-2025"
+    const match = cleanStr.match(/(\d{1,2})[\s.\-/]+(\d{1,2})[\s.\-/]+(\d{2,4})/);
 
     if (match) {
       const day = parseInt(match[1], 10);
@@ -154,6 +154,10 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
           let headerFound = false;
           let colMap: Record<string, number> = {};
 
+          // Track who was seen specifically in THIS sheet to detect implicit discharges later
+          const seenInThisSheet = new Set<string>(); // Stores IDs (RUTs)
+          const explicitlyProcessedInThisSheet = new Set<string>(); // Stores IDs of explicit discharges/transfers
+
           // Helper to process a row data
           const extractPatientData = (row: any[]) => {
             const rut = row[colMap['RUT']];
@@ -239,8 +243,8 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
                  // Note: We use cleanId (RUT) as primary key.
                  let patient = activeAdmissions.get(pData.cleanId);
                  
-                 // If no patient found by RUT, maybe try Name? 
-                 // (Risky for admissions, safer to assume admission list has RUTs, but let's stick to RUT for admissions to define identity)
+                 // Mark that we SAW this patient today
+                 seenInThisSheet.add(pData.cleanId);
 
                  if (!patient) {
                     // NEW ADMISSION (or Re-admission)
@@ -283,40 +287,73 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
                  const patient = findActivePatient(pData.cleanId, pData.name, activeAdmissions);
 
                  if (patient) {
-                   // UPDATED LOGIC: 
-                   // If consigned as discharge, considered discharged the day before they stopped appearing.
-                   // Since they are in ALTAS now (currentDate), we use the `lastSeen` date from the HOSPITALIZED block.
-                   patient.dischargeDate = patient.lastSeen;
+                   // RULE: Explicit discharge. Date = Current Sheet Date.
+                   patient.dischargeDate = currentDate; 
                    patient.status = 'Alta';
                    
                    if (pData.diagnosis && pData.diagnosis.length > (patient.diagnosis || '').length) {
                      patient.diagnosis = pData.diagnosis;
                    }
-                   // Move from active to completed
+                   
                    completedEvents.push(patient);
-                   // Remove from active map (using the key it was stored with)
-                   // We need to find the key since we might have matched by name
+                   
+                   // Remove from active map using the KEY we found it with
                    const keyToDelete = Array.from(activeAdmissions.entries()).find(([k, v]) => v === patient)?.[0];
-                   if (keyToDelete) activeAdmissions.delete(keyToDelete);
+                   if (keyToDelete) {
+                     activeAdmissions.delete(keyToDelete);
+                     explicitlyProcessedInThisSheet.add(keyToDelete);
+                   }
                  }
                } else if (currentBlock === 'TRANSFERRED') {
                  dailyStat.transfers++;
                  const patient = findActivePatient(pData.cleanId, pData.name, activeAdmissions);
 
                  if (patient) {
-                   patient.transferDate = patient.lastSeen; 
+                   patient.transferDate = currentDate; // Explicit transfer, use current date
                    patient.status = 'Traslado';
                    if (pData.diagnosis && pData.diagnosis.length > (patient.diagnosis || '').length) {
                      patient.diagnosis = pData.diagnosis;
                    }
                    completedEvents.push(patient);
+
                    const keyToDelete = Array.from(activeAdmissions.entries()).find(([k, v]) => v === patient)?.[0];
-                   if (keyToDelete) activeAdmissions.delete(keyToDelete);
+                   if (keyToDelete) {
+                     activeAdmissions.delete(keyToDelete);
+                     explicitlyProcessedInThisSheet.add(keyToDelete);
+                   }
                  }
                }
             }
           }
           
+          // --- IMPLICIT DISCHARGE CHECK ---
+          // Rule: "Aquel dia que no aparece debe ser considerado el dia de alta."
+          // If a patient was active (in activeAdmissions) but NOT seen in this sheet's "HOSPITALIZED" block
+          // AND NOT explicitly processed in "ALTAS"/"TRASLADOS", then they disappeared today.
+          
+          // We iterate a copy of keys to safely delete while iterating
+          const activeKeys = Array.from(activeAdmissions.keys());
+          
+          activeKeys.forEach(key => {
+            if (!seenInThisSheet.has(key) && !explicitlyProcessedInThisSheet.has(key)) {
+               const patient = activeAdmissions.get(key);
+               if (patient) {
+                 // Found a missing patient.
+                 // Discharge Date = Current Date (The first day they are missing)
+                 patient.dischargeDate = currentDate;
+                 patient.status = 'Alta'; // Assume Discharge if just missing
+                 
+                 completedEvents.push(patient);
+                 activeAdmissions.delete(key);
+                 
+                 // Optional: Increment discharge count for stats?
+                 // The prompt doesn't explicitly say to count implicit discharges in the daily stats bar chart,
+                 // but usually, if they left, it's a discharge. Let's count it for consistency in numbers.
+                 dailyStat.discharges++;
+               }
+            }
+          });
+
           dailyStatsMap.set(dateStr, dailyStat);
         });
 
