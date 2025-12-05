@@ -1,0 +1,5 @@
+{
+  "name": "Analizador Estadístico Hanga Roa",
+  "description": "Analizador estadístico de hospitalizados para el Hospital Hanga Roa. Procesa archivos Excel locales para generar métricas de ocupación, días de estadía y flujo de pacientes.",
+  "requestFramePermissions": []
+}
