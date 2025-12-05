@@ -12,16 +12,34 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
-  const handleFileUpload = async (file: File) => {
+  const handleFileUpload = async (files: File[]) => {
     setLoading(true);
     setError(null);
     try {
-      const report = await processExcelFile(file);
-      setReports(prev => [...prev, report]);
-      setSelectedReportId(report.id);
+      const promises = files.map(file => processExcelFile(file));
+      const results = await Promise.all(promises);
+      
+      // Sort reports by date (heuristic based on first daily stat)
+      const sortedNewReports = results.sort((a, b) => {
+        const dateA = a.dailyStats[0]?.date || '';
+        const dateB = b.dailyStats[0]?.date || '';
+        return dateA.localeCompare(dateB);
+      });
+
+      setReports(prev => {
+        const combined = [...prev, ...sortedNewReports];
+        // Remove duplicates by ID if any
+        const unique = Array.from(new Map(combined.map(item => [item.id, item])).values());
+        return unique;
+      });
+
+      // Select the first new report if none selected
+      if (!selectedReportId && sortedNewReports.length > 0) {
+        setSelectedReportId(sortedNewReports[0].id);
+      }
     } catch (err) {
       console.error(err);
-      setError("Error al procesar el archivo. Asegúrate de que sea un formato Excel válido del hospital.");
+      setError("Error al procesar uno o más archivos. Asegúrate de que sean formatos Excel válidos del hospital.");
     } finally {
       setLoading(false);
     }
@@ -111,7 +129,7 @@ export default function App() {
                   <h2 className="text-3xl font-bold text-gray-900 mb-2">Bienvenido al Analizador</h2>
                   <p className="text-gray-500">
                     Herramienta local y segura para procesar estadísticas de hospitalizados. 
-                    Selecciona el archivo Excel mensual para comenzar.
+                    Selecciona los archivos Excel mensuales para comenzar.
                   </p>
                 </div>
                 <FileUploader onFileUpload={handleFileUpload} isLoading={loading} />
@@ -128,19 +146,22 @@ export default function App() {
                  {/* Mini Uploader to add more months */}
                 <div className="flex justify-between items-center bg-blue-50 p-4 rounded-xl border border-blue-100">
                    <div className="text-sm text-blue-800">
-                     <span className="font-semibold">¿Necesitas agregar otro mes?</span> Arrastra el archivo aquí o usa el botón.
+                     <span className="font-semibold">¿Necesitas agregar más meses?</span> Arrastra los archivos aquí.
                    </div>
                    <div className="relative">
                       <input 
                         type="file" 
                         className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                         accept=".xlsx,.xls"
+                        multiple
                         onChange={(e) => {
-                          if (e.target.files?.[0]) handleFileUpload(e.target.files[0]);
+                          if (e.target.files && e.target.files.length > 0) {
+                            handleFileUpload(Array.from(e.target.files));
+                          }
                         }}
                       />
                       <button className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 rounded-lg text-xs font-medium transition-colors">
-                        Subir otro mes
+                        Subir archivos
                       </button>
                    </div>
                 </div>

@@ -61,6 +61,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
       'Pasó por UPC': p.wasEverUPC ? 'SI' : 'NO',
       'Es UPC Actualmente': p.isUPC ? 'SI' : 'NO',
       'Fecha Ingreso (Evento)': p.firstSeen.toLocaleDateString(),
+      'Fecha Egreso': p.dischargeDate ? p.dischargeDate.toLocaleDateString() : (p.transferDate ? p.transferDate.toLocaleDateString() : ''),
       'Fecha Última Vista': p.lastSeen.toLocaleDateString(),
       'Estado Final': p.status,
       'Días Estancia': p.los
@@ -245,6 +246,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
                    <th className="px-6 py-3">Cama Final</th>
                    <th className="px-6 py-3">¿Pasó UPC?</th>
                    <th className="px-6 py-3">Ingreso</th>
+                   <th className="px-6 py-3">Fecha Egreso</th>
                    <th className="px-6 py-3">Estadía</th>
                    <th className="px-6 py-3">Estado</th>
                  </tr>
@@ -268,6 +270,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
                         )}
                      </td>
                      <td className="px-6 py-3 text-gray-500">{p.firstSeen.toLocaleDateString()}</td>
+                     <td className="px-6 py-3 text-gray-500">
+                       {p.dischargeDate ? p.dischargeDate.toLocaleDateString() : (p.transferDate ? p.transferDate.toLocaleDateString() : '-')}
+                     </td>
                      <td className="px-6 py-3 font-medium text-gray-900">{p.los} días</td>
                      <td className="px-6 py-3">
                        <StatusBadge status={p.status} />
@@ -304,6 +309,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
                      <th className="px-6 py-3">RUT</th>
                      <th className="px-6 py-3">Diagnóstico</th>
                      <th className="px-6 py-3">Ingreso</th>
+                     <th className="px-6 py-3">Fecha Egreso</th>
                      <th className="px-6 py-3">Estadía Total</th>
                      <th className="px-6 py-3">Estado Final</th>
                    </tr>
@@ -311,7 +317,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
                  <tbody className="divide-y divide-gray-100">
                    {upcPatientsList.length === 0 ? (
                       <tr>
-                        <td colSpan={6} className="px-6 py-8 text-center text-gray-500 italic">
+                        <td colSpan={7} className="px-6 py-8 text-center text-gray-500 italic">
                           No se encontraron pacientes UPC en este mes.
                         </td>
                       </tr>
@@ -322,6 +328,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
                           <td className="px-6 py-3 text-gray-500">{p.rut}</td>
                           <td className="px-6 py-3 text-gray-700">{p.diagnosis}</td>
                           <td className="px-6 py-3 text-gray-500">{p.firstSeen.toLocaleDateString()}</td>
+                          <td className="px-6 py-3 text-gray-500">
+                            {p.dischargeDate ? p.dischargeDate.toLocaleDateString() : (p.transferDate ? p.transferDate.toLocaleDateString() : '-')}
+                          </td>
                           <td className="px-6 py-3 text-gray-900 font-semibold">{p.los} días</td>
                           <td className="px-6 py-3"><StatusBadge status={p.status} /></td>
                         </tr>

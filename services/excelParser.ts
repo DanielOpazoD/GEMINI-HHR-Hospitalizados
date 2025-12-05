@@ -49,8 +49,9 @@ const parseExcelDate = (excelDate: any): Date | null => {
 // Heuristic to check if a row looks like a header
 const isHeaderRow = (row: any[]): boolean => {
   const str = row.join(' ').toUpperCase();
+  // Add support for PATOLOGÍA with accent
   return (str.includes('CAMA') && str.includes('PACIENTE')) || 
-         (str.includes('RUT') && str.includes('DIAG'));
+         (str.includes('RUT') && (str.includes('DIAG') || str.includes('PATOLOGIA') || str.includes('PATOLOGÍA')));
 };
 
 const isUPC = (val: any): boolean => {
@@ -173,7 +174,8 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
                 if (c.includes('CAMA') && !c.includes('TIPO')) colMap['BED'] = idx;
                 if (c.includes('TIPO')) colMap['BEDTYPE'] = idx;
                 if (c.includes('UPC')) colMap['UPC'] = idx;
-                if (c.includes('PATOLOGIA') || c.includes('DIAGNOSTICO') || c === 'DIAG' || c === 'DG' || c === 'DIAG.') colMap['DIAG'] = idx;
+                // Add support for PATOLOGÍA (with accent)
+                if (c.includes('PATOLOGIA') || c.includes('PATOLOGÍA') || c.includes('DIAGNOSTICO') || c === 'DIAG' || c === 'DG' || c === 'DIAG.') colMap['DIAG'] = idx;
               });
               continue;
             }
@@ -231,7 +233,12 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
                  dailyStat.discharges++;
                  if (activeAdmissions.has(pData.cleanId)) {
                    const p = activeAdmissions.get(pData.cleanId)!;
-                   p.dischargeDate = currentDate!;
+                   // UPDATED LOGIC: 
+                   // If consigned as discharge (appears in ALTAS), 
+                   // considered discharged the day before they stopped appearing.
+                   // Since they are in ALTAS now (currentDate), they likely were not in HOSPITALIZED today (or were moved).
+                   // We use the `lastSeen` date from the HOSPITALIZED block tracking as the discharge date.
+                   p.dischargeDate = p.lastSeen;
                    p.status = 'Alta';
                    // Update diagnosis if available in discharge block
                    if (pData.diagnosis && pData.diagnosis.length > (p.diagnosis || '').length) {
@@ -245,7 +252,7 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
                  dailyStat.transfers++;
                  if (activeAdmissions.has(pData.cleanId)) {
                    const p = activeAdmissions.get(pData.cleanId)!;
-                   p.transferDate = currentDate!;
+                   p.transferDate = p.lastSeen; // Same logic as discharge
                    p.status = 'Traslado';
                    if (pData.diagnosis && pData.diagnosis.length > (p.diagnosis || '').length) {
                      p.diagnosis = pData.diagnosis;
@@ -320,7 +327,7 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
         }
 
         resolve({
-          id: Date.now().toString(),
+          id: Date.now().toString() + Math.random(),
           monthName,
           patients: allEvents, // Contains all distinct hospitalization events
           dailyStats: sortedDailyStats,

@@ -1,8 +1,8 @@
 import React, { useCallback } from 'react';
-import { Upload, FileSpreadsheet, Loader2 } from 'lucide-react';
+import { Upload, FileSpreadsheet, Loader2, Files } from 'lucide-react';
 
 interface FileUploaderProps {
-  onFileUpload: (file: File) => void;
+  onFileUpload: (files: File[]) => void;
   isLoading: boolean;
 }
 
@@ -10,15 +10,20 @@ export const FileUploader: React.FC<FileUploaderProps> = ({ onFileUpload, isLoad
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     if (isLoading) return;
-    const file = e.dataTransfer.files[0];
-    if (file && (file.name.endsWith('.xlsx') || file.name.endsWith('.xls'))) {
-      onFileUpload(file);
+    
+    const droppedFiles = (Array.from(e.dataTransfer.files) as File[]).filter(
+      file => file.name.endsWith('.xlsx') || file.name.endsWith('.xls')
+    );
+    
+    if (droppedFiles.length > 0) {
+      onFileUpload(droppedFiles);
     }
   }, [onFileUpload, isLoading]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      onFileUpload(e.target.files[0]);
+    if (e.target.files && e.target.files.length > 0) {
+      const selectedFiles = Array.from(e.target.files) as File[];
+      onFileUpload(selectedFiles);
     }
   };
 
@@ -36,6 +41,7 @@ export const FileUploader: React.FC<FileUploaderProps> = ({ onFileUpload, isLoad
         id="file-upload" 
         className="hidden" 
         accept=".xlsx,.xls" 
+        multiple
         onChange={handleChange}
         disabled={isLoading}
       />
@@ -45,16 +51,16 @@ export const FileUploader: React.FC<FileUploaderProps> = ({ onFileUpload, isLoad
           {isLoading ? (
             <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
           ) : (
-            <FileSpreadsheet className="w-8 h-8 text-blue-600" />
+            <Files className="w-8 h-8 text-blue-600" />
           )}
         </div>
         
         <div>
           <h3 className="text-lg font-semibold text-gray-900">
-            {isLoading ? 'Procesando archivo...' : 'Cargar Reporte Mensual'}
+            {isLoading ? 'Procesando archivos...' : 'Cargar Reportes Mensuales'}
           </h3>
           <p className="text-sm text-gray-500 mt-1 max-w-xs mx-auto">
-            Arrastra tu archivo Excel aquí o haz clic para seleccionar.
+            Arrastra uno o más archivos Excel aquí o haz clic para seleccionar.
             (Formatos .xlsx)
           </p>
         </div>
@@ -64,7 +70,7 @@ export const FileUploader: React.FC<FileUploaderProps> = ({ onFileUpload, isLoad
             htmlFor="file-upload"
             className="px-6 py-2.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors shadow-sm cursor-pointer"
           >
-            Seleccionar Archivo
+            Seleccionar Archivos
           </label>
         )}
       </div>
