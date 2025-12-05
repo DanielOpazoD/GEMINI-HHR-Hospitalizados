@@ -11,27 +11,35 @@ const cleanRut = (rut: any): string => {
 const parseExcelDate = (excelDate: any): Date | null => {
   if (!excelDate) return null;
   if (excelDate instanceof Date) return excelDate;
+  
   // Handle Excel serial date
   if (typeof excelDate === 'number') {
+    // Excel base date logic
     return new Date(Math.round((excelDate - 25569) * 86400 * 1000));
   }
-  // Handle string dates (DD-MM-YYYY or DD/MM/YYYY or DD.MM.YYYY)
+  
+  // Handle string dates (DD-MM-YYYY, DD/MM/YYYY, DD.MM.YYYY, etc)
   if (typeof excelDate === 'string') {
     const cleanStr = excelDate.trim();
-    const parts = cleanStr.split(/[-/.]/);
+    // Split by hyphen, slash, dot, or backslash
+    const parts = cleanStr.split(/[-/.\\]/);
+    
     if (parts.length === 3) {
-      let day = parseInt(parts[0]);
-      let month = parseInt(parts[1]) - 1;
-      let year = parseInt(parts[2]);
+      let day = parseInt(parts[0], 10);
+      let month = parseInt(parts[1], 10) - 1; // Month is 0-indexed in JS
+      let year = parseInt(parts[2], 10);
 
       if (isNaN(day) || isNaN(month) || isNaN(year)) return null;
 
-      // Fix 2-digit year issue (JS Date treats 0-99 as 1900-1999)
-      // We assume for this hospital app that years < 100 are 2000s
+      // FIX: 2-digit year handling
+      // JS Date(99, ...) treats as 1999. We want 2025.
+      // If year is < 100, we assume it's 2000+ for this application context
       if (year < 100) {
         year += 2000;
       }
       
+      // Safety check: If for some reason the year is parsed as 19xx but we are in 2020s context, 
+      // it might be an issue, but standard full years (2025) work fine in new Date(2025, ...)
       return new Date(year, month, day);
     }
   }
@@ -41,7 +49,8 @@ const parseExcelDate = (excelDate: any): Date | null => {
 // Heuristic to check if a row looks like a header
 const isHeaderRow = (row: any[]): boolean => {
   const str = row.join(' ').toUpperCase();
-  return str.includes('CAMA') && str.includes('PACIENTE');
+  return (str.includes('CAMA') && str.includes('PACIENTE')) || 
+         (str.includes('RUT') && str.includes('DIAG'));
 };
 
 const isUPC = (val: any): boolean => {
@@ -118,13 +127,20 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
             if (rawBedType === 'C.M.A' || rawBedType === 'C.M.A.' || rawBedType.includes('MAYOR AMBULATORIA')) {
               rawBedType = 'CMA';
             }
+            // Normalize variants of "MEDIA"
+            if (rawBedType === 'MEDIA' || rawBedType === 'CAMA MEDIA' || rawBedType === 'MEDIO') {
+              rawBedType = 'MEDIA';
+            }
+
+            // Clean Diagnosis
+            const rawDiag = row[colMap['DIAG']] ? String(row[colMap['DIAG']]).trim() : '';
 
             return {
               rutStr: String(rut),
               cleanId,
-              name: String(name),
+              name: String(name).trim(),
               age: row[colMap['AGE']] || 0,
-              diagnosis: row[colMap['DIAG']] || '',
+              diagnosis: rawDiag,
               bedType: rawBedType,
               isUPC: isPatientUPC
             };
@@ -150,13 +166,14 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
               currentBlock = 'HOSPITALIZED';
               row.forEach((cell: any, idx: number) => {
                 const c = String(cell).toUpperCase().trim();
+                // Improved Column Mapping
                 if (c.includes('RUT')) colMap['RUT'] = idx;
                 if (c.includes('PACIENTE') || c.includes('NOMBRE')) colMap['NAME'] = idx;
                 if (c.includes('EDAD')) colMap['AGE'] = idx;
                 if (c.includes('CAMA') && !c.includes('TIPO')) colMap['BED'] = idx;
                 if (c.includes('TIPO')) colMap['BEDTYPE'] = idx;
                 if (c.includes('UPC')) colMap['UPC'] = idx;
-                if (c.includes('PATOLOGIA') || c.includes('DIAGNOSTICO')) colMap['DIAG'] = idx;
+                if (c.includes('PATOLOGIA') || c.includes('DIAGNOSTICO') || c === 'DIAG' || c === 'DG' || c === 'DIAG.') colMap['DIAG'] = idx;
               });
               continue;
             }
@@ -182,7 +199,7 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
                       rut: pData.rutStr,
                       name: pData.name,
                       age: pData.age,
-                      diagnosis: pData.diagnosis,
+                      diagnosis: pData.diagnosis, // Start with current diagnosis
                       bedType: pData.bedType,
                       isUPC: pData.isUPC,
                       wasEverUPC: pData.isUPC, // Initialize flag
@@ -203,9 +220,11 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
                    p.isUPC = pData.isUPC; // Current status
                    if (pData.isUPC) p.wasEverUPC = true; // Latch flag
                    
-                   // Update diagnosis if it changes to something longer/more detailed? 
-                   // Usually keep the latest or the first. Let's keep latest.
-                   if (pData.diagnosis) p.diagnosis = pData.diagnosis;
+                   // CRITICAL FIX: Keep the longest diagnosis string found
+                   // This prevents overwriting a good diagnosis with an empty one from a later day
+                   if (pData.diagnosis && pData.diagnosis.length > (p.diagnosis || '').length) {
+                     p.diagnosis = pData.diagnosis;
+                   }
                  }
 
                } else if (currentBlock === 'DISCHARGED') {
@@ -214,6 +233,10 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
                    const p = activeAdmissions.get(pData.cleanId)!;
                    p.dischargeDate = currentDate!;
                    p.status = 'Alta';
+                   // Update diagnosis if available in discharge block
+                   if (pData.diagnosis && pData.diagnosis.length > (p.diagnosis || '').length) {
+                     p.diagnosis = pData.diagnosis;
+                   }
                    // Move from active to completed
                    completedEvents.push(p);
                    activeAdmissions.delete(pData.cleanId);
@@ -224,6 +247,9 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
                    const p = activeAdmissions.get(pData.cleanId)!;
                    p.transferDate = currentDate!;
                    p.status = 'Traslado';
+                   if (pData.diagnosis && pData.diagnosis.length > (p.diagnosis || '').length) {
+                     p.diagnosis = pData.diagnosis;
+                   }
                    // Move from active to completed
                    completedEvents.push(p);
                    activeAdmissions.delete(pData.cleanId);
