@@ -7,39 +7,52 @@ const cleanRut = (rut: any): string => {
   return String(rut).replace(/\./g, '').replace(/-/g, '').trim().toUpperCase();
 };
 
-// Helper to parse Excel dates
+// Helper to normalize names for fuzzy matching
+// Removes accents, special chars, and extra spaces
+const normalizeName = (name: string): string => {
+  if (!name) return '';
+  return name.toString().toUpperCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // Remove accents
+    .replace(/[^A-Z\s]/g, "") // Remove non-letters (keep spaces)
+    .replace(/\s+/g, " ") // Collapse multiple spaces
+    .trim();
+};
+
+// Strict Helper to parse Excel dates focusing on DD-MM-YYYY format
 const parseExcelDate = (excelDate: any): Date | null => {
   if (!excelDate) return null;
   if (excelDate instanceof Date) return excelDate;
   
-  // Handle Excel serial date
+  // Handle Excel serial date (Number)
   if (typeof excelDate === 'number') {
-    // Excel base date logic
+    // Excel base date logic (approximate for JS)
     return new Date(Math.round((excelDate - 25569) * 86400 * 1000));
   }
   
-  // Handle string dates (DD-MM-YYYY, DD/MM/YYYY, DD.MM.YYYY, etc)
+  // Handle string dates strictly as DD-MM-YYYY
+  // User Requirement: "El formato es dia-mes-año"
   if (typeof excelDate === 'string') {
     const cleanStr = excelDate.trim();
-    // Split by hyphen, slash, dot, or backslash
-    const parts = cleanStr.split(/[-/.\\]/);
     
-    if (parts.length === 3) {
-      let day = parseInt(parts[0], 10);
-      let month = parseInt(parts[1], 10) - 1; // Month is 0-indexed in JS
-      let year = parseInt(parts[2], 10);
+    // Regex matches: (1 or 2 digits) separator (1 or 2 digits) separator (2 or 4 digits)
+    // Separators can be space, dot, hyphen, slash
+    // Group 1: Day, Group 2: Month, Group 3: Year
+    const match = cleanStr.match(/^(\d{1,2})[\s.\-/]+(\d{1,2})[\s.\-/]+(\d{2,4})$/);
+
+    if (match) {
+      const day = parseInt(match[1], 10);
+      const month = parseInt(match[2], 10) - 1; // Month is 0-indexed in JS (0=Jan, 3=April)
+      let year = parseInt(match[3], 10);
 
       if (isNaN(day) || isNaN(month) || isNaN(year)) return null;
 
       // FIX: 2-digit year handling
-      // JS Date(99, ...) treats as 1999. We want 2025.
       // If year is < 100, we assume it's 2000+ for this application context
+      // e.g., "25" -> 2025
       if (year < 100) {
         year += 2000;
       }
       
-      // Safety check: If for some reason the year is parsed as 19xx but we are in 2020s context, 
-      // it might be an issue, but standard full years (2025) work fine in new Date(2025, ...)
       return new Date(year, month, day);
     }
   }
@@ -60,6 +73,27 @@ const isUPC = (val: any): boolean => {
   return s === 'SI' || s === 'X' || s.includes('UPC') || s.includes('UCI') || s.includes('UTI');
 };
 
+// Helper to find a patient in the active map, either by RUT or by Name
+const findActivePatient = (rut: string, name: string, activeAdmissions: Map<string, Patient>): Patient | undefined => {
+  // 1. Try exact RUT match first (most reliable)
+  if (rut && rut !== 'SIN-RUT' && activeAdmissions.has(rut)) {
+    return activeAdmissions.get(rut);
+  }
+
+  // 2. Fallback: Try Name match
+  // This handles cases where Discharge block has missing RUT
+  const targetName = normalizeName(name);
+  if (!targetName) return undefined;
+
+  for (const patient of activeAdmissions.values()) {
+    if (normalizeName(patient.name) === targetName) {
+      return patient;
+    }
+  }
+
+  return undefined;
+};
+
 export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -78,6 +112,10 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
         const completedEvents: Patient[] = [];
 
         const dailyStatsMap = new Map<string, DailyStats>();
+        
+        // Track month frequency to name the report correctly (Mode)
+        const monthFrequency = new Map<string, number>();
+
         const sheetNames = workbook.SheetNames;
         
         // Sort sheet names by date
@@ -90,11 +128,15 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
         sheetsWithDates.sort((a, b) => a.date!.getTime() - b.date!.getTime());
 
         sheetsWithDates.forEach(({ name: sheetName, date: currentDate }) => {
+          if (!currentDate) return; 
+
+          // Tally month/year for report naming
+          const monthKey = `${currentDate.getFullYear()}-${currentDate.getMonth()}`;
+          monthFrequency.set(monthKey, (monthFrequency.get(monthKey) || 0) + 1);
+
           const sheet = workbook.Sheets[sheetName];
           const jsonData: any[][] = XLSX.utils.sheet_to_json(sheet, { header: 1 });
           
-          if (!currentDate) return; 
-
           const dateStr = currentDate.toISOString().split('T')[0];
           
           // Initialize daily stat
@@ -116,9 +158,11 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
           const extractPatientData = (row: any[]) => {
             const rut = row[colMap['RUT']];
             const name = row[colMap['NAME']];
-            if (!rut || !name) return null;
             
-            const cleanId = cleanRut(rut);
+            // Allow processing if Name exists, even if RUT is missing (for Discharge blocks)
+            if (!name) return null;
+            
+            const cleanId = rut ? cleanRut(rut) : 'SIN-RUT';
             const isPatientUPC = isUPC(row[colMap['UPC']]);
             
             // Normalize Bed Type
@@ -137,7 +181,7 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
             const rawDiag = row[colMap['DIAG']] ? String(row[colMap['DIAG']]).trim() : '';
 
             return {
-              rutStr: String(rut),
+              rutStr: rut ? String(rut) : '',
               cleanId,
               name: String(name).trim(),
               age: row[colMap['AGE']] || 0,
@@ -186,12 +230,19 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
                if (!pData) continue;
                
                if (currentBlock === 'HOSPITALIZED') {
+                 // For Hospitalized block, we prefer having a valid RUT if possible, but we process anyway
                  dailyStat.totalOccupancy++;
                  if (pData.isUPC) dailyStat.upcOccupancy++;
                  else dailyStat.nonUpcOccupancy++;
 
                  // LOGIC: Check if this patient is currently active
-                 if (!activeAdmissions.has(pData.cleanId)) {
+                 // Note: We use cleanId (RUT) as primary key.
+                 let patient = activeAdmissions.get(pData.cleanId);
+                 
+                 // If no patient found by RUT, maybe try Name? 
+                 // (Risky for admissions, safer to assume admission list has RUTs, but let's stick to RUT for admissions to define identity)
+
+                 if (!patient) {
                     // NEW ADMISSION (or Re-admission)
                     // We generate a unique ID for this specific event to avoid collisions in React keys later
                     const eventId = `${pData.cleanId}-${dateStr}`;
@@ -212,54 +263,55 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
                       history: [dateStr]
                     };
                     activeAdmissions.set(pData.cleanId, newPatient);
-                    // We count admission in daily stats later by aggregating firstSeen dates
                  } else {
                    // EXISTING ADMISSION - Update data
-                   const p = activeAdmissions.get(pData.cleanId)!;
-                   p.lastSeen = currentDate!;
-                   p.history.push(dateStr);
-                   p.bedType = pData.bedType || p.bedType;
-                   p.isUPC = pData.isUPC; // Current status
-                   if (pData.isUPC) p.wasEverUPC = true; // Latch flag
+                   patient.lastSeen = currentDate!;
+                   patient.history.push(dateStr);
+                   patient.bedType = pData.bedType || patient.bedType;
+                   patient.isUPC = pData.isUPC; // Current status
+                   if (pData.isUPC) patient.wasEverUPC = true; // Latch flag
                    
                    // CRITICAL FIX: Keep the longest diagnosis string found
-                   // This prevents overwriting a good diagnosis with an empty one from a later day
-                   if (pData.diagnosis && pData.diagnosis.length > (p.diagnosis || '').length) {
-                     p.diagnosis = pData.diagnosis;
+                   if (pData.diagnosis && pData.diagnosis.length > (patient.diagnosis || '').length) {
+                     patient.diagnosis = pData.diagnosis;
                    }
                  }
 
                } else if (currentBlock === 'DISCHARGED') {
                  dailyStat.discharges++;
-                 if (activeAdmissions.has(pData.cleanId)) {
-                   const p = activeAdmissions.get(pData.cleanId)!;
+                 // Match patient using RUT or Name Fallback
+                 const patient = findActivePatient(pData.cleanId, pData.name, activeAdmissions);
+
+                 if (patient) {
                    // UPDATED LOGIC: 
-                   // If consigned as discharge (appears in ALTAS), 
-                   // considered discharged the day before they stopped appearing.
-                   // Since they are in ALTAS now (currentDate), they likely were not in HOSPITALIZED today (or were moved).
-                   // We use the `lastSeen` date from the HOSPITALIZED block tracking as the discharge date.
-                   p.dischargeDate = p.lastSeen;
-                   p.status = 'Alta';
-                   // Update diagnosis if available in discharge block
-                   if (pData.diagnosis && pData.diagnosis.length > (p.diagnosis || '').length) {
-                     p.diagnosis = pData.diagnosis;
+                   // If consigned as discharge, considered discharged the day before they stopped appearing.
+                   // Since they are in ALTAS now (currentDate), we use the `lastSeen` date from the HOSPITALIZED block.
+                   patient.dischargeDate = patient.lastSeen;
+                   patient.status = 'Alta';
+                   
+                   if (pData.diagnosis && pData.diagnosis.length > (patient.diagnosis || '').length) {
+                     patient.diagnosis = pData.diagnosis;
                    }
                    // Move from active to completed
-                   completedEvents.push(p);
-                   activeAdmissions.delete(pData.cleanId);
+                   completedEvents.push(patient);
+                   // Remove from active map (using the key it was stored with)
+                   // We need to find the key since we might have matched by name
+                   const keyToDelete = Array.from(activeAdmissions.entries()).find(([k, v]) => v === patient)?.[0];
+                   if (keyToDelete) activeAdmissions.delete(keyToDelete);
                  }
                } else if (currentBlock === 'TRANSFERRED') {
                  dailyStat.transfers++;
-                 if (activeAdmissions.has(pData.cleanId)) {
-                   const p = activeAdmissions.get(pData.cleanId)!;
-                   p.transferDate = p.lastSeen; // Same logic as discharge
-                   p.status = 'Traslado';
-                   if (pData.diagnosis && pData.diagnosis.length > (p.diagnosis || '').length) {
-                     p.diagnosis = pData.diagnosis;
+                 const patient = findActivePatient(pData.cleanId, pData.name, activeAdmissions);
+
+                 if (patient) {
+                   patient.transferDate = patient.lastSeen; 
+                   patient.status = 'Traslado';
+                   if (pData.diagnosis && pData.diagnosis.length > (patient.diagnosis || '').length) {
+                     patient.diagnosis = pData.diagnosis;
                    }
-                   // Move from active to completed
-                   completedEvents.push(p);
-                   activeAdmissions.delete(pData.cleanId);
+                   completedEvents.push(patient);
+                   const keyToDelete = Array.from(activeAdmissions.entries()).find(([k, v]) => v === patient)?.[0];
+                   if (keyToDelete) activeAdmissions.delete(keyToDelete);
                  }
                }
             }
@@ -269,17 +321,18 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
         });
 
         // End of all sheets. 
-        // Any patient still in `activeAdmissions` is still hospitalized at end of month.
-        // Move them to the final list.
         const remainingPatients = Array.from(activeAdmissions.values());
-        const allEvents = [...completedEvents, ...remainingPatients];
+        
+        // SORTING: Sort all events chronologically by admission date
+        const allEvents = [...completedEvents, ...remainingPatients].sort((a, b) => 
+          a.firstSeen.getTime() - b.firstSeen.getTime()
+        );
 
         // Post-processing: Calculate LOS for all events
         let totalLOS = 0;
         
         allEvents.forEach(p => {
           // Determine End Date
-          // Priority: Discharge > Transfer > LastSeen
           let endDate = p.lastSeen;
           if (p.transferDate) endDate = p.transferDate;
           if (p.dischargeDate) endDate = p.dischargeDate;
@@ -313,17 +366,35 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
         const uniqueUPCRuts = new Set<string>();
         allEvents.forEach(p => {
             if (p.wasEverUPC) {
-                uniqueUPCRuts.add(cleanRut(p.rut));
+                // Use Name as part of key if RUT is missing to try to count correctly
+                const key = p.rut && p.rut !== 'SIN-RUT' ? cleanRut(p.rut) : p.name;
+                uniqueUPCRuts.add(key);
             }
         });
         const totalUpcPatients = uniqueUPCRuts.size;
 
-        // Month name from first date
+        // Month name Calculation (MODE)
+        // Find the most frequent month/year in the sheets to name the report
+        let bestMonthKey = "";
+        let maxCount = 0;
+        
+        monthFrequency.forEach((count, key) => {
+            if (count > maxCount) {
+                maxCount = count;
+                bestMonthKey = key;
+            }
+        });
+
         let monthName = "Reporte Mensual";
-        if (sortedDailyStats.length > 0) {
+        if (bestMonthKey) {
+            const [yearStr, monthIndexStr] = bestMonthKey.split('-');
+            const d = new Date(parseInt(yearStr), parseInt(monthIndexStr), 1);
+            const m = d.toLocaleString('es-ES', { month: 'long', year: 'numeric' });
+            monthName = m.charAt(0).toUpperCase() + m.slice(1);
+        } else if (sortedDailyStats.length > 0) {
            const d = new Date(sortedDailyStats[0].date);
-           monthName = d.toLocaleString('es-ES', { month: 'long', year: 'numeric' });
-           monthName = monthName.charAt(0).toUpperCase() + monthName.slice(1);
+           const m = d.toLocaleString('es-ES', { month: 'long', year: 'numeric' });
+           monthName = m.charAt(0).toUpperCase() + m.slice(1);
         }
 
         resolve({
