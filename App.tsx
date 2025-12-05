@@ -1,13 +1,17 @@
 import React, { useState } from 'react';
-import { Activity, Menu, X, BarChart3, Archive } from 'lucide-react';
+import { Activity, Menu, X, BarChart3 } from 'lucide-react';
 import { FileUploader } from './components/FileUploader';
 import { Dashboard } from './components/Dashboard';
-import { processExcelFile } from './services/excelParser';
-import { MonthlyReport } from './types';
+import { parseExcelToSnapshots, reconcileSnapshots, generateMonthlyReports } from './services/excelParser';
+import { MonthlyReport, PatientSnapshot } from './types';
 
 export default function App() {
   const [reports, setReports] = useState<MonthlyReport[]>([]);
   const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
+  
+  // Data Lake: Store all raw snapshots from all files
+  const [allSnapshots, setAllSnapshots] = useState<PatientSnapshot[]>([]);
+  
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -16,30 +20,36 @@ export default function App() {
     setLoading(true);
     setError(null);
     try {
-      const promises = files.map(file => processExcelFile(file));
-      const results = await Promise.all(promises);
+      // 1. Parse new files into snapshots
+      const newSnapshotsArrays = await Promise.all(files.map(file => parseExcelToSnapshots(file)));
+      const newSnapshots = newSnapshotsArrays.flat();
       
-      // Sort reports by date (heuristic based on first daily stat)
-      const sortedNewReports = results.sort((a, b) => {
-        const dateA = a.dailyStats[0]?.date || '';
-        const dateB = b.dailyStats[0]?.date || '';
-        return dateA.localeCompare(dateB);
-      });
-
-      setReports(prev => {
-        const combined = [...prev, ...sortedNewReports];
-        // Remove duplicates by ID if any
-        const unique = Array.from(new Map(combined.map(item => [item.id, item])).values());
-        return unique;
-      });
-
-      // Select the first new report if none selected
-      if (!selectedReportId && sortedNewReports.length > 0) {
-        setSelectedReportId(sortedNewReports[0].id);
+      if (newSnapshots.length === 0) {
+        throw new Error("No se encontraron datos válidos en los archivos.");
       }
-    } catch (err) {
+
+      // 2. Append to Data Lake
+      // We combine old and new. 
+      // Note: Real-world app might need deduplication if same file uploaded twice.
+      // For now, we trust the append or could filter by sourceFile if needed.
+      const updatedSnapshots = [...allSnapshots, ...newSnapshots];
+      setAllSnapshots(updatedSnapshots);
+
+      // 3. Reconcile ALL data to build unified patient timelines
+      const unifiedEvents = reconcileSnapshots(updatedSnapshots);
+
+      // 4. Generate Reports from Unified Events
+      const generatedReports = generateMonthlyReports(unifiedEvents);
+
+      setReports(generatedReports);
+
+      // Select the most recent report if none selected
+      if (!selectedReportId && generatedReports.length > 0) {
+        setSelectedReportId(generatedReports[generatedReports.length - 1].id);
+      }
+    } catch (err: any) {
       console.error(err);
-      setError("Error al procesar uno o más archivos. Asegúrate de que sean formatos Excel válidos del hospital.");
+      setError(err.message || "Error al procesar archivos.");
     } finally {
       setLoading(false);
     }
@@ -71,11 +81,11 @@ export default function App() {
         </div>
 
         <nav className="p-4 space-y-2">
-          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-4 px-2">Reportes Cargados</div>
+          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-4 px-2">Reportes Generados</div>
           
           {reports.length === 0 && (
             <div className="px-2 py-4 text-sm text-slate-600 italic text-center border border-dashed border-slate-700 rounded-lg">
-              No hay reportes. Carga un archivo Excel.
+              No hay datos. Carga archivos Excel.
             </div>
           )}
 
@@ -146,7 +156,7 @@ export default function App() {
                  {/* Mini Uploader to add more months */}
                 <div className="flex justify-between items-center bg-blue-50 p-4 rounded-xl border border-blue-100">
                    <div className="text-sm text-blue-800">
-                     <span className="font-semibold">¿Necesitas agregar más meses?</span> Arrastra los archivos aquí.
+                     <span className="font-semibold">¿Necesitas agregar más meses?</span> Sube archivos adicionales para unificar el análisis.
                    </div>
                    <div className="relative">
                       <input 
@@ -160,7 +170,7 @@ export default function App() {
                           }
                         }}
                       />
-                      <button className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 rounded-lg text-xs font-medium transition-colors">
+                      <button className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 rounded-lg text-xs font-medium transition-colors pointer-events-none">
                         Subir archivos
                       </button>
                    </div>

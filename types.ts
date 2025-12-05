@@ -2,13 +2,24 @@ export interface RawRow {
   [key: string]: any;
 }
 
+export interface PatientSnapshot {
+  date: Date;
+  rut: string;
+  name: string;
+  diagnosis: string;
+  bedType: string;
+  isUPC: boolean;
+  status: 'HOSPITALIZED' | 'DISCHARGED' | 'TRANSFERRED';
+  sourceFile: string;
+}
+
 export interface Patient {
   id: string; // Unique Event ID (e.g., RUT-AdmissionDate)
   rut: string; // Original RUT
   name: string;
   age: number | string;
   diagnosis: string;
-  bedType: string;
+  bedType: string; // The most recent or significant bed type
   isUPC: boolean; // Current status
   wasEverUPC: boolean; // Flag: Did they touch UPC during this stay?
   firstSeen: Date;
@@ -17,7 +28,7 @@ export interface Patient {
   transferDate?: Date;
   status: 'Hospitalizado' | 'Alta' | 'Traslado' | 'Desconocido';
   los: number; // Length of Stay
-  history: string[]; // Dates seen
+  history: string[]; // Dates seen (ISO strings)
 }
 
 export interface DailyStats {
@@ -33,13 +44,13 @@ export interface DailyStats {
 export interface MonthlyReport {
   id: string; // Unique ID for the report
   monthName: string; // e.g., "Noviembre 2025"
-  patients: Patient[]; // This is actually a list of "Events" or "Admissions"
+  patients: Patient[]; // Events active in this month
   dailyStats: DailyStats[];
   totalAdmissions: number;
   totalDischarges: number;
   totalUpcPatients: number; // Unique individuals who were in UPC
   avgLOS: number;
-  occupancyRate: number; // Placeholder calculation
+  occupancyRate: number; // Placeholder
 }
 
 export enum FileStatus {
