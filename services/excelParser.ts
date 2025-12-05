@@ -18,35 +18,67 @@ const normalizeName = (name: string): string => {
     .trim();
 };
 
-// --- NEW DATE PARSING LOGIC ---
+// --- DATE PARSING CONTEXT LOGIC ---
 
-// Helper to extract day, month, and optional year from a string
-// Returns null if no valid date pattern is found
+const SPANISH_MONTHS: Record<string, number> = {
+  'ENERO': 0, 'FEBRERO': 1, 'MARZO': 2, 'ABRIL': 3, 'MAYO': 4, 'JUNIO': 5,
+  'JULIO': 6, 'AGOSTO': 7, 'SEPTIEMBRE': 8, 'OCTUBRE': 9, 'NOVIEMBRE': 10, 'DICIEMBRE': 11
+};
+
+interface DateContext {
+  year: number | null;
+  month: number | null; // 0-indexed
+}
+
+// Extract potential context from filename (e.g., "11. NOVIEMBRE (1).xlsx")
+const getContextFromFilename = (filename: string): DateContext => {
+  const upper = filename.toUpperCase();
+  let month: number | null = null;
+  let year: number | null = null;
+
+  // Find Month Name
+  for (const [name, idx] of Object.entries(SPANISH_MONTHS)) {
+    if (upper.includes(name)) {
+      month = idx;
+      break;
+    }
+  }
+
+  // Find Year (4 digits, reasonably recent)
+  const yearMatch = upper.match(/(202\d)/);
+  if (yearMatch) {
+    year = parseInt(yearMatch[1], 10);
+  }
+
+  return { month, year };
+};
+
+// Extract raw numbers from a date string like "01-11" or "05.11.25"
 const extractDateParts = (str: string) => {
-  // Regex matches: 
-  // 1. Day (1-2 digits)
-  // 2. Separator (space, dot, hyphen, slash)
-  // 3. Month (1-2 digits)
-  // 4. Optional: Separator + Year (2 or 4 digits)
-  // This allows matches like "1-11", "01.11", "1/11/2025", "Sabado 1-11-25"
+  // Matches: Num separator Num [separator Num]
+  // Separators: - . / space
+  // Examples: "1-11", "01.11", "01/11/2025"
   const match = str.match(/(\d{1,2})[\s.\-/]+(\d{1,2})(?:[\s.\-/]+(\d{2,4}))?/);
   
   if (!match) return null;
   
   return {
-    day: parseInt(match[1], 10),
-    month: parseInt(match[2], 10) - 1, // 0-indexed (0=Jan)
-    year: match[3] ? parseInt(match[3], 10) : null
+    p1: parseInt(match[1], 10),
+    p2: parseInt(match[2], 10),
+    p3: match[3] ? parseInt(match[3], 10) : null
   };
 };
 
-// Helper to parse Excel dates focusing on DD-MM-YYYY format with context year
-const parseExcelDate = (excelDate: any, contextYear: number): Date | null => {
+// Primary Date Parsing Function
+// Uses the determined context (Month/Year) to disambiguate strings like "01-11"
+const parseExcelDate = (excelDate: any, context: { year: number, month: number | null }): Date | null => {
   if (!excelDate) return null;
   if (excelDate instanceof Date) return excelDate;
   
   // Handle Excel serial date (Number)
   if (typeof excelDate === 'number') {
+    // Excel base date: Dec 30 1899 usually. 
+    // Approx calc: (value - 25569) * 86400 * 1000
     return new Date(Math.round((excelDate - 25569) * 86400 * 1000));
   }
   
@@ -54,25 +86,48 @@ const parseExcelDate = (excelDate: any, contextYear: number): Date | null => {
     const parts = extractDateParts(excelDate);
     if (!parts) return null;
 
-    if (isNaN(parts.day) || isNaN(parts.month)) return null;
-
-    let year = parts.year;
+    let day: number, month: number, year: number;
     
-    // If year is missing, use the dominant context year from the file
-    if (year === null) {
-        year = contextYear;
+    // Normalize Year
+    if (parts.p3 !== null) {
+      year = parts.p3;
+      if (year < 100) year += 2000;
     } else {
-        // Handle 2-digit years (e.g., 25 -> 2025)
-        if (year < 100) {
-            year += 2000;
-        }
+      year = context.year; // Use context year if missing
     }
 
-    const date = new Date(year, parts.month, parts.day);
+    // DISAMBIGUATION LOGIC
+    // We have p1 and p2. One is Day, one is Month.
+    // Standard ES format: DD-MM
     
-    // JS Date autocorrects invalid days (e.g. Feb 30 -> Mar 2). 
-    // We check if the month matches to ensure validity.
-    if (date.getMonth() !== parts.month) return null;
+    if (context.month !== null) {
+      // If we KNOW the month (e.g. November = 10), enforce it.
+      // Check if p2 is Month (11)
+      if (parts.p2 === context.month + 1) {
+        day = parts.p1;
+        month = parts.p2 - 1;
+      } 
+      // Check if p1 is Month (11) - Rare reversed case (MM-DD)
+      else if (parts.p1 === context.month + 1) {
+        day = parts.p2;
+        month = parts.p1 - 1;
+      }
+      // If neither matches strictly, but p2 looks like a valid month for the year...
+      else {
+        // Fallback: Assume Standard DD-MM
+        day = parts.p1;
+        month = parts.p2 - 1;
+      }
+    } else {
+      // No context month known. Assume Standard DD-MM
+      day = parts.p1;
+      month = parts.p2 - 1;
+    }
+
+    const date = new Date(year, month, day);
+    
+    // Validation: JS auto-rolls over dates (e.g. Feb 30 -> Mar 2). Check if match.
+    if (date.getMonth() !== month) return null;
 
     return date;
   }
@@ -123,35 +178,58 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
         const data = e.target?.result;
         const workbook = XLSX.read(data, { type: 'binary' });
         
-        // --- STEP 1: SCAN SHEETS FOR DOMINANT YEAR ---
-        // Many sheets might lack the year (e.g. "4-11"). 
-        // We find the most frequent year across all sheets to use as default.
+        // --- STEP 1: ESTABLISH CONTEXT (THE "TRUTH") ---
+        // 1. Guess from Filename
+        const fileContext = getContextFromFilename(file.name);
+        
+        // 2. Guess from Sheets (find unambiguous dates)
         const sheetNames = workbook.SheetNames;
         const yearCounts: Record<number, number> = {};
-        let fallbackYear = new Date().getFullYear();
-
+        const monthCounts: Record<number, number> = {};
+        
         sheetNames.forEach(name => {
             const parts = extractDateParts(name);
-            if (parts && parts.year !== null) {
-                let y = parts.year;
+            if (parts && parts.p3 !== null) { // Has Year
+                let y = parts.p3;
                 if (y < 100) y += 2000;
                 yearCounts[y] = (yearCounts[y] || 0) + 1;
+                
+                // If has year, p2 is likely month (DD-MM-YYYY)
+                const m = parts.p2 - 1; // 0-indexed
+                if (m >= 0 && m <= 11) {
+                    monthCounts[m] = (monthCounts[m] || 0) + 1;
+                }
             }
         });
 
-        // Find max
+        // Determine Dominant Year
+        let dominantYear = fileContext.year || new Date().getFullYear();
         let maxYearCount = 0;
-        let dominantYear = fallbackYear;
-        Object.entries(yearCounts).forEach(([yearStr, count]) => {
+        Object.entries(yearCounts).forEach(([yStr, count]) => {
             if (count > maxYearCount) {
                 maxYearCount = count;
-                dominantYear = parseInt(yearStr, 10);
+                dominantYear = parseInt(yStr, 10);
             }
         });
 
-        // --- STEP 2: PARSE SHEETS AND SORT CHRONOLOGICALLY ---
+        // Determine Dominant Month
+        // Filename takes precedence. If not in filename, use sheet consensus.
+        let dominantMonth = fileContext.month;
+        if (dominantMonth === null) {
+            let maxMonthCount = 0;
+            Object.entries(monthCounts).forEach(([mStr, count]) => {
+                if (count > maxMonthCount) {
+                    maxMonthCount = count;
+                    dominantMonth = parseInt(mStr, 10);
+                }
+            });
+        }
+
+        const globalContext = { year: dominantYear, month: dominantMonth };
+        
+        // --- STEP 2: PARSE SHEETS WITH CONTEXT ---
         const sheetsWithDates = sheetNames.map(name => {
-            const date = parseExcelDate(name, dominantYear);
+            const date = parseExcelDate(name, globalContext);
             return { name, date };
         }).filter((item): item is { name: string, date: Date } => item.date !== null);
 
@@ -168,14 +246,7 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
 
         const dailyStatsMap = new Map<string, DailyStats>();
         
-        // Track month frequency to name the report correctly (Mode)
-        const monthFrequency = new Map<string, number>();
-
         sheetsWithDates.forEach(({ name: sheetName, date: currentDate }) => {
-          // Tally month/year for report naming
-          const monthKey = `${currentDate.getFullYear()}-${currentDate.getMonth()}`;
-          monthFrequency.set(monthKey, (monthFrequency.get(monthKey) || 0) + 1);
-
           const sheet = workbook.Sheets[sheetName];
           const jsonData: any[][] = XLSX.utils.sheet_to_json(sheet, { header: 1 });
           
@@ -276,32 +347,25 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
                if (!pData) continue;
                
                if (currentBlock === 'HOSPITALIZED') {
-                 // For Hospitalized block, we prefer having a valid RUT if possible, but we process anyway
                  dailyStat.totalOccupancy++;
                  if (pData.isUPC) dailyStat.upcOccupancy++;
                  else dailyStat.nonUpcOccupancy++;
 
-                 // LOGIC: Check if this patient is currently active
-                 // Note: We use cleanId (RUT) as primary key.
                  let patient = activeAdmissions.get(pData.cleanId);
-                 
-                 // Mark that we SAW this patient today
                  seenInThisSheet.add(pData.cleanId);
 
                  if (!patient) {
                     // NEW ADMISSION (or Re-admission)
-                    // We generate a unique ID for this specific event to avoid collisions in React keys later
                     const eventId = `${pData.cleanId}-${dateStr}`;
-                    
                     const newPatient: Patient = {
                       id: eventId,
                       rut: pData.rutStr,
                       name: pData.name,
                       age: pData.age,
-                      diagnosis: pData.diagnosis, // Start with current diagnosis
+                      diagnosis: pData.diagnosis,
                       bedType: pData.bedType,
                       isUPC: pData.isUPC,
-                      wasEverUPC: pData.isUPC, // Initialize flag
+                      wasEverUPC: pData.isUPC,
                       firstSeen: currentDate!,
                       lastSeen: currentDate!,
                       status: 'Hospitalizado',
@@ -310,14 +374,13 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
                     };
                     activeAdmissions.set(pData.cleanId, newPatient);
                  } else {
-                   // EXISTING ADMISSION - Update data
+                   // EXISTING ADMISSION
                    patient.lastSeen = currentDate!;
                    patient.history.push(dateStr);
                    patient.bedType = pData.bedType || patient.bedType;
                    patient.isUPC = pData.isUPC; // Current status
                    if (pData.isUPC) patient.wasEverUPC = true; // Latch flag
                    
-                   // CRITICAL FIX: Keep the longest diagnosis string found
                    if (pData.diagnosis && pData.diagnosis.length > (patient.diagnosis || '').length) {
                      patient.diagnosis = pData.diagnosis;
                    }
@@ -325,11 +388,9 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
 
                } else if (currentBlock === 'DISCHARGED') {
                  dailyStat.discharges++;
-                 // Match patient using RUT or Name Fallback
                  const patient = findActivePatient(pData.cleanId, pData.name, activeAdmissions);
 
                  if (patient) {
-                   // RULE: Explicit discharge. Date = Current Sheet Date.
                    patient.dischargeDate = currentDate; 
                    patient.status = 'Alta';
                    
@@ -338,8 +399,6 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
                    }
                    
                    completedEvents.push(patient);
-                   
-                   // Remove from active map using the KEY we found it with
                    const keyToDelete = Array.from(activeAdmissions.entries()).find(([k, v]) => v === patient)?.[0];
                    if (keyToDelete) {
                      activeAdmissions.delete(keyToDelete);
@@ -351,13 +410,12 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
                  const patient = findActivePatient(pData.cleanId, pData.name, activeAdmissions);
 
                  if (patient) {
-                   patient.transferDate = currentDate; // Explicit transfer, use current date
+                   patient.transferDate = currentDate;
                    patient.status = 'Traslado';
                    if (pData.diagnosis && pData.diagnosis.length > (patient.diagnosis || '').length) {
                      patient.diagnosis = pData.diagnosis;
                    }
                    completedEvents.push(patient);
-
                    const keyToDelete = Array.from(activeAdmissions.entries()).find(([k, v]) => v === patient)?.[0];
                    if (keyToDelete) {
                      activeAdmissions.delete(keyToDelete);
@@ -369,26 +427,15 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
           }
           
           // --- IMPLICIT DISCHARGE CHECK ---
-          // Rule: "Aquel dia que no aparece debe ser considerado el dia de alta."
-          // If a patient was active (in activeAdmissions) but NOT seen in this sheet's "HOSPITALIZED" block
-          // AND NOT explicitly processed in "ALTAS"/"TRASLADOS", then they disappeared today.
-          
-          // We iterate a copy of keys to safely delete while iterating
           const activeKeys = Array.from(activeAdmissions.keys());
-          
           activeKeys.forEach(key => {
             if (!seenInThisSheet.has(key) && !explicitlyProcessedInThisSheet.has(key)) {
                const patient = activeAdmissions.get(key);
                if (patient) {
-                 // Found a missing patient.
-                 // Discharge Date = Current Date (The first day they are missing)
                  patient.dischargeDate = currentDate;
-                 patient.status = 'Alta'; // Assume Discharge if just missing
-                 
+                 patient.status = 'Alta';
                  completedEvents.push(patient);
                  activeAdmissions.delete(key);
-                 
-                 // Optional: Increment discharge count for stats?
                  dailyStat.discharges++;
                }
             }
@@ -407,22 +454,19 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
 
         // Post-processing: Calculate LOS for all events
         let totalLOS = 0;
-        
         allEvents.forEach(p => {
-          // Determine End Date
           let endDate = p.lastSeen;
           if (p.transferDate) endDate = p.transferDate;
           if (p.dischargeDate) endDate = p.dischargeDate;
           
-          // Calculate LOS
           const diffTime = Math.abs(endDate.getTime() - p.firstSeen.getTime());
           const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
-          p.los = diffDays === 0 ? 1 : diffDays; // Minimum 1 day if seen
+          p.los = diffDays === 0 ? 1 : diffDays;
           
           totalLOS += p.los;
         });
 
-        // Determine Admissions count per day (Backfill based on event start dates)
+        // Backfill admissions count
         allEvents.forEach(p => {
           const admissionDateStr = p.firstSeen.toISOString().split('T')[0];
           if (dailyStatsMap.has(admissionDateStr)) {
@@ -434,38 +478,24 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
           new Date(a.date).getTime() - new Date(b.date).getTime()
         );
 
-        // Calculate aggregates
-        const totalAdmissions = allEvents.length; // Total events
+        const totalAdmissions = allEvents.length;
         const totalDischarges = sortedDailyStats.reduce((acc, curr) => acc + curr.discharges, 0);
         const avgLOS = allEvents.length > 0 ? parseFloat((totalLOS / allEvents.length).toFixed(1)) : 0;
         
-        // Calculate Unique UPC Patients (People, not events)
+        // Calculate Unique UPC Patients
         const uniqueUPCRuts = new Set<string>();
         allEvents.forEach(p => {
             if (p.wasEverUPC) {
-                // Use Name as part of key if RUT is missing to try to count correctly
                 const key = p.rut && p.rut !== 'SIN-RUT' ? cleanRut(p.rut) : p.name;
                 uniqueUPCRuts.add(key);
             }
         });
         const totalUpcPatients = uniqueUPCRuts.size;
 
-        // Month name Calculation (MODE)
-        // Find the most frequent month/year in the sheets to name the report
-        let bestMonthKey = "";
-        let maxMonthCount = 0;
-        
-        monthFrequency.forEach((count, key) => {
-            if (count > maxMonthCount) {
-                maxMonthCount = count;
-                bestMonthKey = key;
-            }
-        });
-
+        // Month name Calculation using Global Context
         let monthName = "Reporte Mensual";
-        if (bestMonthKey) {
-            const [yearStr, monthIndexStr] = bestMonthKey.split('-');
-            const d = new Date(parseInt(yearStr), parseInt(monthIndexStr), 1);
+        if (globalContext.month !== null) {
+            const d = new Date(globalContext.year, globalContext.month, 1);
             const m = d.toLocaleString('es-ES', { month: 'long', year: 'numeric' });
             monthName = m.charAt(0).toUpperCase() + m.slice(1);
         } else if (sortedDailyStats.length > 0) {
@@ -477,7 +507,7 @@ export const processExcelFile = async (file: File): Promise<MonthlyReport> => {
         resolve({
           id: Date.now().toString() + Math.random(),
           monthName,
-          patients: allEvents, // Contains all distinct hospitalization events
+          patients: allEvents,
           dailyStats: sortedDailyStats,
           totalAdmissions,
           totalDischarges,
