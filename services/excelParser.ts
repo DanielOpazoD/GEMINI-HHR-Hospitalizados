@@ -7,8 +7,8 @@ import { Patient, DailyStats, AnalysisReport, PatientSnapshot } from '../types';
 const cleanRut = (rut: any): string => {
   if (!rut) return '';
   // Remove dots, dashes, whitespace. Convert to upper case.
-  // Example: 17.752.753-K -> 17752753K
-  return String(rut).replace(/[^0-9kK]/g, '').toUpperCase();
+  // Remove leading zeros to ensure 017.xxx and 17.xxx are treated as identical.
+  return String(rut).replace(/[^0-9kK]/g, '').toUpperCase().replace(/^0+/, '');
 };
 
 const normalizeName = (name: string): string => {
@@ -65,13 +65,14 @@ const extractDateParts = (str: string) => {
 
 const parseExcelDate = (excelDate: any, context: { year: number, month: number | null }): Date | null => {
   if (!excelDate) return null;
-  if (excelDate instanceof Date) return excelDate;
   
-  if (typeof excelDate === 'number') {
-    return new Date(Math.round((excelDate - 25569) * 86400 * 1000));
-  }
-  
-  if (typeof excelDate === 'string') {
+  let date: Date | null = null;
+
+  if (excelDate instanceof Date) {
+    date = new Date(excelDate);
+  } else if (typeof excelDate === 'number') {
+    date = new Date(Math.round((excelDate - 25569) * 86400 * 1000));
+  } else if (typeof excelDate === 'string') {
     const parts = extractDateParts(excelDate);
     if (!parts) return null;
 
@@ -107,10 +108,14 @@ const parseExcelDate = (excelDate: any, context: { year: number, month: number |
         month = parts.p2 - 1;
     }
 
-    const date = new Date(year, month, day);
-    if (date.getMonth() !== month) return null; 
-    
-    return date;
+    date = new Date(year, month, day);
+  }
+
+  if (date) {
+      // FORCE NOON (12:00:00)
+      // This is critical to prevent "same day" being treated as different due to time/timezone
+      date.setHours(12, 0, 0, 0);
+      return date;
   }
   return null;
 };
@@ -213,7 +218,6 @@ export const parseExcelToSnapshots = async (file: File): Promise<PatientSnapshot
                     currentBlock = 'DISCHARGED';
                     continue;
                   }
-                  // Detect TRASLADO variants
                   if (rowStr.includes('TRASLADO') || rowStr.includes('TRASLAD') || rowStr.includes('DERIVADO')) {
                     currentBlock = 'TRANSFERRED';
                     continue;
@@ -248,6 +252,9 @@ export const parseExcelToSnapshots = async (file: File): Promise<PatientSnapshot
                     if (!nameRaw) continue;
                     if (nameCheck === 'NOMBRE' || nameCheck.includes('NOMBRE DEL PACIENTE') || nameCheck === 'PACIENTE') continue;
                     if (rutCheck === 'RUT' || rutCheck === 'RUN') continue;
+                    // Extra safety: duplicated header row
+                    if (nameCheck === 'NOMBRE' && rutCheck === 'RUT') continue;
+                    
                     if (nameCheck.includes('SERVICIO DE') || nameCheck.includes('UNIDAD DE')) continue;
                     if (nameCheck.includes('CAMA') || nameCheck.includes('TIPO DE CAMA')) continue;
 
@@ -322,10 +329,7 @@ export const reconcileSnapshots = (snapshots: PatientSnapshot[]): Patient[] => {
                 // Fallback: Use Name as ID if RUT is completely unknown
                 key = 'NAME-' + n;
             }
-        } else {
-            // Case: We have RUT, but maybe name was written slightly differently before
-            // We trust the RUT.
-        }
+        } 
 
         if (!patientGroups.has(key)) patientGroups.set(key, []);
         patientGroups.get(key)!.push(s);
@@ -333,10 +337,42 @@ export const reconcileSnapshots = (snapshots: PatientSnapshot[]): Patient[] => {
 
     const events: Patient[] = [];
 
-    patientGroups.forEach((patientSnaps, patientKey) => {
-        // Sort individual patient history
-        patientSnaps.sort((a, b) => a.date.getTime() - b.date.getTime());
+    patientGroups.forEach((rawSnaps, patientKey) => {
+        // 1. Sort by date
+        rawSnaps.sort((a, b) => a.date.getTime() - b.date.getTime());
+
+        // 2. CONSOLIDATE SAME-DAY SNAPSHOTS
+        // This merges duplicates if a patient appears multiple times in one day (e.g., bed change)
+        const consolidatedSnaps: PatientSnapshot[] = [];
+        if (rawSnaps.length > 0) {
+            let lastSnap = rawSnaps[0];
+            
+            for (let i = 1; i < rawSnaps.length; i++) {
+                const currentSnap = rawSnaps[i];
+                // Compare dates strict (since time is normalized to 12:00:00)
+                if (currentSnap.date.getTime() === lastSnap.date.getTime()) {
+                    // Merge Strategy
+                    // Priority to UPC
+                    if (currentSnap.isUPC && !lastSnap.isUPC) {
+                        lastSnap = currentSnap;
+                    }
+                    // Keep Discharged/Transferred status if present
+                    if (currentSnap.status !== 'HOSPITALIZED' && lastSnap.status === 'HOSPITALIZED') {
+                        lastSnap.status = currentSnap.status;
+                    }
+                    // Keep Longest Diagnosis
+                    if ((currentSnap.diagnosis || '').length > (lastSnap.diagnosis || '').length) {
+                        lastSnap.diagnosis = currentSnap.diagnosis;
+                    }
+                } else {
+                    consolidatedSnaps.push(lastSnap);
+                    lastSnap = currentSnap;
+                }
+            }
+            consolidatedSnaps.push(lastSnap);
+        }
         
+        const patientSnaps = consolidatedSnaps;
         let currentEvent: Patient | null = null;
 
         for (let i = 0; i < patientSnaps.length; i++) {
@@ -352,8 +388,9 @@ export const reconcileSnapshots = (snapshots: PatientSnapshot[]): Patient[] => {
                 const diffTime = snap.date.getTime() - lastDate.getTime();
                 gapDays = Math.round(diffTime / (1000 * 3600 * 24)) - 1; // Days strictly between records
                 
-                // Gap Rule: If > 1 day missing between records, it's a new event.
-                if (gapDays > 0) {
+                // Gap Rule: Tolerance is now 1 day to handle missing Sunday sheets, etc.
+                // If gapDays is 1 (e.g. Sat -> Mon), we treat as continuous.
+                if (gapDays > 1) {
                     isGap = true; 
                 }
             }
@@ -364,7 +401,6 @@ export const reconcileSnapshots = (snapshots: PatientSnapshot[]): Patient[] => {
                 if (currentEvent && isGap && currentEvent.status === 'Hospitalizado') {
                     // IMPLICIT DISCHARGE RULE:
                     // If patient was seen on Day X and disappears, discharge date is Day X + 1.
-                    // This is NOT an inconsistency. It is the administrative rule.
                     
                     const implicitDischargeDate = new Date(currentEvent.lastSeen);
                     implicitDischargeDate.setDate(implicitDischargeDate.getDate() + 1); 
@@ -372,15 +408,10 @@ export const reconcileSnapshots = (snapshots: PatientSnapshot[]): Patient[] => {
                     currentEvent.dischargeDate = implicitDischargeDate;
                     currentEvent.status = 'Alta';
                     
-                    // Final LOS Calc for previous event
                     const diff = Math.ceil((implicitDischargeDate.getTime() - currentEvent.firstSeen.getTime()) / (86400000));
                     currentEvent.los = diff > 0 ? diff : 1;
                 }
 
-                // Start New Event logic
-                // If this snapshot is just a discharge/transfer record with no prior hospitalization,
-                // we treat it as a 1-day event or skip if logic dictates. 
-                // But generally, we start the event.
                 currentEvent = {
                     id: `${patientKey}-${snapDateStr}`,
                     rut: snap.rut || (patientKey.startsWith('NAME-') ? '' : patientKey),
@@ -399,7 +430,6 @@ export const reconcileSnapshots = (snapshots: PatientSnapshot[]): Patient[] => {
                     inconsistencies: []
                 };
 
-                // If the very first record of the event says DISCHARGED or TRANSFERRED
                 if (snap.status === 'DISCHARGED') {
                      currentEvent.status = 'Alta';
                      currentEvent.dischargeDate = snap.date;
@@ -414,20 +444,28 @@ export const reconcileSnapshots = (snapshots: PatientSnapshot[]): Patient[] => {
 
             } else {
                 // --- CONTINUE EXISTING EVENT ---
+                
+                // RESURRECTION LOGIC:
+                // If the event was closed (Discharged/Transferred) but the patient reappears within the continuity window (<= 1 day gap),
+                // we cancel the discharge and extend the stay. This merges "split events".
+                if (currentEvent.status === 'Alta' || currentEvent.status === 'Traslado') {
+                    currentEvent.status = 'Hospitalizado';
+                    currentEvent.dischargeDate = undefined;
+                    currentEvent.transferDate = undefined;
+                }
+
                 currentEvent.lastSeen = snap.date;
                 currentEvent.history.push(snapDateStr);
                 
-                // Update Metadata (Last Bed Type, Diagnosis enrichment)
+                // Update Metadata
                 currentEvent.bedType = snap.bedType || currentEvent.bedType;
                 currentEvent.isUPC = snap.isUPC; // Current status
                 if (snap.isUPC) currentEvent.wasEverUPC = true; // Historical flag
                 
-                // Keep the longest diagnosis found
                 if (snap.diagnosis && snap.diagnosis.length > (currentEvent.diagnosis || '').length) {
                     currentEvent.diagnosis = snap.diagnosis;
                 }
 
-                // Handle Explicit Discharge/Transfer found in census
                 if (snap.status === 'DISCHARGED') {
                     currentEvent.dischargeDate = snap.date;
                     currentEvent.status = 'Alta';
@@ -440,18 +478,16 @@ export const reconcileSnapshots = (snapshots: PatientSnapshot[]): Patient[] => {
 
         // --- FINALIZE LAST EVENT ---
         if (currentEvent && currentEvent.status === 'Hospitalizado') {
-            // Check if patient was seen on the GLOBAL last day of data
             const isAtGlobalEnd = currentEvent.lastSeen.getTime() === globalMaxDate.getTime();
             
             if (isAtGlobalEnd) {
-                // Still hospitalized at the end of the loaded period
+                // Still hospitalized
                 currentEvent.dischargeDate = undefined;
                 currentEvent.status = 'Hospitalizado';
-                // LOS so far
                 const diff = Math.ceil((currentEvent.lastSeen.getTime() - currentEvent.firstSeen.getTime()) / (86400000));
                 currentEvent.los = diff > 0 ? diff : 1; 
             } else {
-                // Patient disappeared before the data ended -> Implicit Discharge
+                // Implicit Discharge
                 const implicitDischargeDate = new Date(currentEvent.lastSeen);
                 implicitDischargeDate.setDate(implicitDischargeDate.getDate() + 1);
                 currentEvent.dischargeDate = implicitDischargeDate;
@@ -460,12 +496,10 @@ export const reconcileSnapshots = (snapshots: PatientSnapshot[]): Patient[] => {
                 currentEvent.los = diff > 0 ? diff : 1;
             }
         } else if (currentEvent) {
-             // Calculate LOS for explicitly discharged/transferred events
              let end = currentEvent.lastSeen;
              if (currentEvent.dischargeDate) end = currentEvent.dischargeDate;
              if (currentEvent.transferDate) end = currentEvent.transferDate;
              
-             // LOS = Exit Date - Admit Date
              const diff = Math.ceil((end.getTime() - currentEvent.firstSeen.getTime()) / (86400000));
              currentEvent.los = diff > 0 ? diff : 1;
         }
@@ -477,13 +511,11 @@ export const reconcileSnapshots = (snapshots: PatientSnapshot[]): Patient[] => {
 // --- STAGE 3: GENERATE REPORTS (STRICT PERIOD LOGIC) ---
 
 export const generateReportForPeriod = (events: Patient[], title: string, start: Date, end: Date): AnalysisReport | null => {
-    
     // 1. Identify active events in this period
-    // Intersection: [EventStart, EventEnd] overlaps with [PeriodStart, PeriodEnd]
     const periodEvents = events.filter(e => {
-        const eventEnd = e.dischargeDate || e.transferDate || new Date(8640000000000000); // Infinity if active
+        const eventEnd = e.dischargeDate || e.transferDate || new Date(8640000000000000);
         return e.firstSeen <= end && eventEnd >= start;
-    }).map(e => ({...e})); // Clone to avoid mutation of global state
+    }).map(e => ({...e})); 
 
     if (periodEvents.length === 0) return null;
 
@@ -492,7 +524,7 @@ export const generateReportForPeriod = (events: Patient[], title: string, start:
     // Initialize Daily Stats for the period
     const cursor = new Date(start);
     while (cursor <= end) {
-        if (cursor > new Date()) break; // Don't project future
+        if (cursor > new Date()) break; 
         const dateStr = cursor.toISOString().split('T')[0];
         dailyStatsMap.set(dateStr, {
             date: dateStr,
@@ -513,19 +545,14 @@ export const generateReportForPeriod = (events: Patient[], title: string, start:
     // 2. Compute Period-Specific Metrics
     periodEvents.forEach(e => {
         let daysInThisPeriod = 0;
-
-        // Effective End Date for calculation: 
-        // If discharged, use discharge date. If still active, use infinity (but logic below handles limits).
         const eventEnd = e.dischargeDate || e.transferDate;
 
-        // Check Admissions in this period
         if (e.firstSeen >= start && e.firstSeen <= end) {
             totalAdmissions++;
             const dStr = e.firstSeen.toISOString().split('T')[0];
             if (dailyStatsMap.has(dStr)) dailyStatsMap.get(dStr)!.admissions++;
         }
 
-        // Check Discharges in this period
         if (eventEnd && eventEnd >= start && eventEnd <= end) {
             totalDischarges++;
             const dStr = eventEnd.toISOString().split('T')[0];
@@ -535,23 +562,12 @@ export const generateReportForPeriod = (events: Patient[], title: string, start:
             }
         }
 
-        // UPC Check
         if (e.wasEverUPC) uniqueUPC.add(e.rut || e.name);
 
-        // Calculate Bed Days (Occupancy) - STRICT RULE
-        // "El día cama corresponde a cada día en que el paciente aparece en la tabla diaria"
-        // "El día de egreso nunca genera día cama"
-        
-        // Iterate through each day of the period
+        // Bed Day Calculation (Chilean Normative)
         const dayCursor = new Date(start);
         while (dayCursor <= end) {
              const currentDateStr = dayCursor.toISOString().split('T')[0];
-             
-             // Condition: 
-             // 1. Patient has been admitted (firstSeen <= today)
-             // 2. Patient has NOT been discharged yet (today < dischargeDate OR dischargeDate is null)
-             // 3. Exception: Traslado implies they left that day, so no bed day that day either.
-             
              const isAdmitted = e.firstSeen <= dayCursor;
              const isNotDischarged = !eventEnd || dayCursor < eventEnd;
 
@@ -567,16 +583,13 @@ export const generateReportForPeriod = (events: Patient[], title: string, start:
              }
              dayCursor.setDate(dayCursor.getDate() + 1);
         }
-
         e.daysInPeriod = daysInThisPeriod;
     });
 
     const validStats = Array.from(dailyStatsMap.values())
-        .filter(s => s.totalOccupancy > 0 || s.admissions > 0 || s.discharges > 0) // Filter out empty placeholder days outside data range
+        .filter(s => s.totalOccupancy > 0 || s.admissions > 0 || s.discharges > 0)
         .sort((a, b) => a.date.localeCompare(b.date));
 
-    // Calculate Average LOS for discharges in this period
-    // Note: This uses total LOS of the event, not just days in period, as per standard clinical metrics.
     const dischargedInPeriod = periodEvents.filter(e => {
         const endD = e.dischargeDate || e.transferDate;
         return endD && endD >= start && endD <= end;
@@ -590,7 +603,7 @@ export const generateReportForPeriod = (events: Patient[], title: string, start:
         title,
         startDate: start,
         endDate: end,
-        patients: periodEvents, // Contains updated daysInPeriod
+        patients: periodEvents, 
         dailyStats: validStats,
         totalAdmissions,
         totalDischarges,
@@ -616,7 +629,6 @@ export const generateMonthlyReports = (events: Patient[]): AnalysisReport[] => {
     const reports: AnalysisReport[] = [];
     const currentIter = new Date(minDate.getFullYear(), minDate.getMonth(), 1);
     
-    // Generate reports up to the max date found
     while (currentIter <= maxDate) { 
         const monthStart = new Date(currentIter.getFullYear(), currentIter.getMonth(), 1);
         const monthEnd = new Date(currentIter.getFullYear(), currentIter.getMonth() + 1, 0);
