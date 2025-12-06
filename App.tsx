@@ -1,3 +1,4 @@
+
 import React, { useState } from 'react';
 import { Activity, Menu, X, BarChart3, CalendarRange, ChevronDown } from 'lucide-react';
 import { FileUploader } from './components/FileUploader';
@@ -56,9 +57,50 @@ export default function App() {
   // --- ANALYSIS GENERATORS ---
 
   const generateYearReport = (year: number) => {
-    const start = new Date(year, 0, 1);
-    const end = new Date(year, 11, 31);
-    const report = generateReportForPeriod(unifiedEvents, `Anual ${year}`, start, end);
+    // 1. Filter events relevant to this year
+    const eventsInYear = unifiedEvents.filter(e => 
+      e.firstSeen.getFullYear() === year || 
+      e.lastSeen.getFullYear() === year
+    );
+
+    if (eventsInYear.length === 0) {
+      setError(`No hay datos registrados para el año ${year}`);
+      return;
+    }
+
+    // 2. Determine actual data range (Min Date to Max Date within this year)
+    let minDate = new Date(year, 11, 31);
+    let maxDate = new Date(year, 0, 1);
+
+    eventsInYear.forEach(e => {
+       if (e.firstSeen < minDate) minDate = e.firstSeen;
+       if (e.lastSeen > maxDate) maxDate = e.lastSeen;
+    });
+
+    // Clamp dates to the requested year
+    const yearStart = new Date(year, 0, 1);
+    const yearEnd = new Date(year, 11, 31);
+    
+    // Effective Reporting Period: From the first recorded event of the year to the last.
+    const effectiveStart = minDate < yearStart ? yearStart : minDate;
+    const effectiveEnd = maxDate > yearEnd ? yearEnd : maxDate;
+
+    // Safety check: ensure start <= end
+    if (effectiveStart > effectiveEnd) {
+       // Fallback to full year if something is weird, though logic shouldn't allow this
+       generateReportForPeriod(unifiedEvents, `Anual ${year}`, yearStart, yearEnd);
+       return;
+    }
+
+    // Create report title with actual range info if partial
+    let title = `Anual ${year}`;
+    if (effectiveEnd.getMonth() < 11 || effectiveStart.getMonth() > 0) {
+        const startStr = effectiveStart.toLocaleDateString('es-ES', { month: 'short' });
+        const endStr = effectiveEnd.toLocaleDateString('es-ES', { month: 'short' });
+        title = `Anual ${year} (${startStr} - ${endStr})`;
+    }
+
+    const report = generateReportForPeriod(unifiedEvents, title, effectiveStart, effectiveEnd);
     if (report) setSelectedReport(report);
   };
 

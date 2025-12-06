@@ -23,22 +23,24 @@ export interface Patient {
   bedType: string; // The most recent or significant bed type
   isUPC: boolean; // Current status
   wasEverUPC: boolean; // Flag: Did they touch UPC during this stay?
-  firstSeen: Date;
-  lastSeen: Date;
-  dischargeDate?: Date;
+  firstSeen: Date; // Admission Date
+  lastSeen: Date; // Last date appearing in census
+  dischargeDate?: Date; // Calculated Discharge Date (Day of exit, not counted as bed day)
   transferDate?: Date;
   status: 'Hospitalizado' | 'Alta' | 'Traslado' | 'Desconocido';
-  los: number; // Length of Stay
+  los: number; // Total Length of Stay (Global)
+  daysInPeriod: number; // Bed days strictly within the analyzed period
   history: string[]; // Dates seen (ISO strings)
+  inconsistencies: string[]; // Warnings about data quality
 }
 
 export interface DailyStats {
   date: string; // ISO Date YYYY-MM-DD
-  totalOccupancy: number;
+  totalOccupancy: number; // Bed days generated on this date
   upcOccupancy: number;
   nonUpcOccupancy: number;
-  admissions: number;
-  discharges: number;
+  admissions: number; // New events starting this day
+  discharges: number; // Events ending this day
   transfers: number;
 }
 
@@ -47,7 +49,7 @@ export interface AnalysisReport {
   title: string; // e.g., "Noviembre 2025" or "Q1 2025"
   startDate: Date;
   endDate: Date;
-  patients: Patient[]; // Events active in this period
+  patients: Patient[]; // Events active in this period (with period-specific stats)
   dailyStats: DailyStats[];
   totalAdmissions: number;
   totalDischarges: number;

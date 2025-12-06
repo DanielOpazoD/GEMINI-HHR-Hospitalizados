@@ -4,7 +4,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
   BarChart, Bar, PieChart, Pie, Cell
 } from 'recharts';
-import { Users, Activity, LogOut, Clock, Filter, Download, HeartPulse, X } from 'lucide-react';
+import { Users, Activity, LogOut, Clock, Filter, Download, HeartPulse, X, AlertTriangle } from 'lucide-react';
 import { AnalysisReport, Patient } from '../types';
 import * as XLSX from 'xlsx';
 
@@ -25,6 +25,18 @@ const BED_COLORS: Record<string, string> = {
   'INDEFINIDO': '#94a3b8' // Slate
 };
 const DEFAULT_COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042'];
+
+// Helper to format RUT: 12345678K -> 12.345.678-K
+const formatRut = (rut: string): string => {
+  if (!rut || rut.length < 2) return rut;
+  // If already formatted, return
+  if (rut.includes('-')) return rut;
+  
+  const dv = rut.slice(-1);
+  const body = rut.slice(0, -1);
+  const formattedBody = body.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  return `${formattedBody}-${dv}`;
+};
 
 export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
   const [filter, setFilter] = useState<'ALL' | 'UPC' | 'MEDIA'>('ALL');
@@ -54,7 +66,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
   const downloadCSV = () => {
     // Flatten patient data for CSV
     const rows = report.patients.map(p => ({
-      RUT: p.rut,
+      RUT: formatRut(p.rut),
       Nombre: p.name,
       Edad: p.age,
       Diagnóstico: p.diagnosis,
@@ -65,7 +77,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
       'Fecha Egreso': p.dischargeDate ? p.dischargeDate.toLocaleDateString() : (p.transferDate ? p.transferDate.toLocaleDateString() : ''),
       'Fecha Última Vista': p.lastSeen.toLocaleDateString(),
       'Estado Final': p.status,
-      'Días Estancia': p.los
+      'Estadía Total (Días)': p.los,
+      'Días Cama Periodo': p.daysInPeriod,
+      'Inconsistencias': p.inconsistencies.join(' | ')
     }));
 
     const ws = XLSX.utils.json_to_sheet(rows);
@@ -123,7 +137,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
           {/* KPI Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
             <KpiCard icon={<Users className="text-blue-600" />} title="Ocupación Promedio" value={avgOccupancy} sub={`Máximo: ${maxOccupancy}`} />
-            <KpiCard icon={<Activity className="text-indigo-600" />} title="Ingresos (Eventos)" value={report.totalAdmissions} sub="Hospitalizaciones" />
+            <KpiCard icon={<Activity className="text-indigo-600" />} title="Ingresos (Eventos)" value={report.totalAdmissions} sub="Nuevos en este periodo" />
             
             {/* Clickable UPC Card */}
             <KpiCard 
@@ -135,8 +149,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
               className="cursor-pointer hover:bg-rose-50 hover:border-rose-200 transition-colors group"
             />
             
-            <KpiCard icon={<LogOut className="text-green-600" />} title="Altas Totales" value={report.totalDischarges} sub="Confirmadas" />
-            <KpiCard icon={<Clock className="text-orange-600" />} title="Estadía Promedio" value={report.avgLOS} sub="Días por evento" />
+            <KpiCard icon={<LogOut className="text-green-600" />} title="Altas Totales" value={report.totalDischarges} sub="Confirmadas en periodo" />
+            <KpiCard icon={<Clock className="text-orange-600" />} title="Estadía Promedio" value={report.avgLOS} sub="Días (Egresados)" />
           </div>
 
           {/* Charts Row 1 */}
@@ -259,37 +273,49 @@ export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
                    <th className="px-6 py-3">Nombre</th>
                    <th className="px-6 py-3">RUT</th>
                    <th className="px-6 py-3">Diagnóstico</th>
-                   <th className="px-6 py-3">Cama Final</th>
-                   <th className="px-6 py-3">¿Pasó UPC?</th>
+                   <th className="px-6 py-3">Cama</th>
                    <th className="px-6 py-3">Ingreso</th>
                    <th className="px-6 py-3">Fecha Egreso</th>
-                   <th className="px-6 py-3">Estadía</th>
+                   <th className="px-6 py-3 text-center bg-blue-50">Días Mes</th>
+                   <th className="px-6 py-3 text-center">Estadía Total</th>
                    <th className="px-6 py-3">Estado</th>
                  </tr>
                </thead>
                <tbody className="divide-y divide-gray-100">
                  {filteredPatients.map((p, idx) => (
                    <tr key={p.id} className="hover:bg-gray-50 transition-colors">
-                     <td className="px-6 py-3 font-medium text-gray-900">{p.name}</td>
-                     <td className="px-6 py-3 text-gray-500">{p.rut}</td>
-                     <td className="px-6 py-3 text-gray-500 truncate max-w-xs" title={p.diagnosis}>{p.diagnosis}</td>
+                     <td className="px-6 py-3 font-medium text-gray-900">
+                       {p.name}
+                       {p.inconsistencies.length > 0 && (
+                         <div className="group relative inline-block ml-2 align-middle">
+                           <div className="text-amber-500 cursor-help">
+                             <AlertTriangle size={14} />
+                           </div>
+                           <div className="invisible group-hover:visible absolute left-0 top-6 z-50 w-64 p-2 bg-gray-900 text-white text-xs rounded shadow-lg border border-gray-800">
+                             {p.inconsistencies.map((inc, i) => <div key={i} className="mb-1">• {inc}</div>)}
+                           </div>
+                         </div>
+                       )}
+                     </td>
+                     <td className="px-6 py-3 text-gray-500 whitespace-nowrap">{formatRut(p.rut)}</td>
+                     <td className="px-6 py-3 text-gray-700 max-w-[200px] truncate cursor-help border-b border-dotted border-gray-300" title={p.diagnosis}>
+                       {p.diagnosis || '-'}
+                     </td>
                      <td className="px-6 py-3">
                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${p.bedType && p.bedType.includes('UPC') ? 'bg-red-50 text-red-700' : 'bg-gray-100 text-gray-700'}`}>
                          {p.bedType || 'Sala'}
                        </span>
                      </td>
-                     <td className="px-6 py-3">
-                        {p.wasEverUPC ? (
-                            <span className="text-xs font-bold text-red-600 bg-red-50 px-2 py-1 rounded border border-red-100">SÍ</span>
-                        ) : (
-                            <span className="text-xs text-gray-400">NO</span>
-                        )}
-                     </td>
                      <td className="px-6 py-3 text-gray-500">{p.firstSeen.toLocaleDateString()}</td>
                      <td className="px-6 py-3 text-gray-500">
                        {p.dischargeDate ? p.dischargeDate.toLocaleDateString() : (p.transferDate ? p.transferDate.toLocaleDateString() : '-')}
                      </td>
-                     <td className="px-6 py-3 font-medium text-gray-900">{p.los} días</td>
+                     <td className="px-6 py-3 text-center bg-blue-50 font-bold text-blue-800">
+                       {p.daysInPeriod}
+                     </td>
+                     <td className="px-6 py-3 text-center font-medium text-gray-900">
+                       {p.los}
+                     </td>
                      <td className="px-6 py-3">
                        <StatusBadge status={p.status} />
                      </td>
@@ -341,7 +367,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
                       upcPatientsList.map((p) => (
                         <tr key={p.id} className="hover:bg-gray-50 transition-colors">
                           <td className="px-6 py-3 font-medium text-gray-900">{p.name}</td>
-                          <td className="px-6 py-3 text-gray-500">{p.rut}</td>
+                          <td className="px-6 py-3 text-gray-500 whitespace-nowrap">{formatRut(p.rut)}</td>
                           <td className="px-6 py-3 text-gray-700">{p.diagnosis}</td>
                           <td className="px-6 py-3 text-gray-500">{p.firstSeen.toLocaleDateString()}</td>
                           <td className="px-6 py-3 text-gray-500">
