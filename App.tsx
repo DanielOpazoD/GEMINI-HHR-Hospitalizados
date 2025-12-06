@@ -1,10 +1,12 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Activity, Menu, X, BarChart3, CalendarRange, ChevronDown } from 'lucide-react';
 import { FileUploader } from './components/FileUploader';
 import { Dashboard } from './components/Dashboard';
-import { parseExcelToSnapshots, reconcileSnapshots, generateMonthlyReports, generateReportForPeriod } from './services/excelParser';
+import { parseExcelToSnapshots } from './services/excelParser';
+import { reconcileSnapshots, generateMonthlyReports, generateReportForPeriod } from './services/reconciliationService';
 import { AnalysisReport, PatientSnapshot, Patient } from './types';
+import { runTests } from './tests/runTests';
 
 export default function App() {
   const [reports, setReports] = useState<AnalysisReport[]>([]); // Monthly reports
@@ -21,6 +23,11 @@ export default function App() {
   // Analysis Inputs
   const [customStartMonth, setCustomStartMonth] = useState('');
   const [customEndMonth, setCustomEndMonth] = useState('');
+
+  useEffect(() => {
+    // Expose test runner to console
+    window.runMedicalTests = runTests;
+  }, []);
 
   const handleFileUpload = async (files: File[]) => {
     setLoading(true);

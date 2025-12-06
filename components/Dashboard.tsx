@@ -5,8 +5,9 @@ import {
   BarChart, Bar, PieChart, Pie, Cell
 } from 'recharts';
 import { Users, Activity, LogOut, Clock, Filter, Download, HeartPulse, X, AlertTriangle } from 'lucide-react';
-import { AnalysisReport, Patient } from '../types';
+import { AnalysisReport } from '../types';
 import * as XLSX from 'xlsx';
+import { formatRut } from '../utils/formatters';
 
 interface DashboardProps {
   report: AnalysisReport;
@@ -25,18 +26,6 @@ const BED_COLORS: Record<string, string> = {
   'INDEFINIDO': '#94a3b8' // Slate
 };
 const DEFAULT_COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042'];
-
-// Helper to format RUT: 12345678K -> 12.345.678-K
-const formatRut = (rut: string): string => {
-  if (!rut || rut.length < 2) return rut;
-  // If already formatted, return
-  if (rut.includes('-')) return rut;
-  
-  const dv = rut.slice(-1);
-  const body = rut.slice(0, -1);
-  const formattedBody = body.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
-  return `${formattedBody}-${dv}`;
-};
 
 export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
   const [filter, setFilter] = useState<'ALL' | 'UPC' | 'MEDIA'>('ALL');
