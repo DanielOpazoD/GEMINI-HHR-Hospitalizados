@@ -4,7 +4,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
   BarChart, Bar, PieChart, Pie, Cell
 } from 'recharts';
-import { Users, Activity, LogOut, Clock, Filter, Download, HeartPulse, X, AlertTriangle } from 'lucide-react';
+import { Users, Activity, LogOut, Clock, Filter, Download, HeartPulse, X, AlertTriangle, Info } from 'lucide-react';
 import { AnalysisReport } from '../types';
 import * as XLSX from 'xlsx';
 import { formatRut } from '../utils/formatters';
@@ -125,8 +125,19 @@ export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
         <>
           {/* KPI Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
-            <KpiCard icon={<Users className="text-blue-600" />} title="Ocupación Promedio" value={avgOccupancy} sub={`Máximo: ${maxOccupancy}`} />
-            <KpiCard icon={<Activity className="text-indigo-600" />} title="Ingresos (Eventos)" value={report.totalAdmissions} sub="Nuevos en este periodo" />
+            <KpiCard 
+              icon={<Users className="text-blue-600" />} 
+              title="Camas Ocupadas (Prom)" 
+              value={avgOccupancy} 
+              sub={`Máximo: ${maxOccupancy} camas`} 
+              tooltip="Promedio diario de pacientes hospitalizados (Censo)"
+            />
+            <KpiCard 
+              icon={<Activity className="text-indigo-600" />} 
+              title="Ingresos (Eventos)" 
+              value={report.totalAdmissions} 
+              sub="Nuevos en este periodo" 
+            />
             
             {/* Clickable UPC Card */}
             <KpiCard 
@@ -138,14 +149,25 @@ export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
               className="cursor-pointer hover:bg-rose-50 hover:border-rose-200 transition-colors group"
             />
             
-            <KpiCard icon={<LogOut className="text-green-600" />} title="Altas Totales" value={report.totalDischarges} sub="Confirmadas en periodo" />
-            <KpiCard icon={<Clock className="text-orange-600" />} title="Estadía Promedio" value={report.avgLOS} sub="Días (Egresados)" />
+            <KpiCard 
+              icon={<LogOut className="text-green-600" />} 
+              title="Altas Totales" 
+              value={report.totalDischarges} 
+              sub="Confirmadas en periodo" 
+            />
+            <KpiCard 
+              icon={<Clock className="text-orange-600" />} 
+              title="Estadía Promedio (ALOS)" 
+              value={report.avgLOS} 
+              sub="Días (Solo Egresados)" 
+              tooltip="Calculado solo en base a pacientes dados de alta o trasladados. Excluye pacientes activos."
+            />
           </div>
 
           {/* Charts Row 1 */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-2 bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
-              <h3 className="text-lg font-semibold text-gray-800 mb-4">Evolución Ocupación Diaria</h3>
+              <h3 className="text-lg font-semibold text-gray-800 mb-4">Evolución Ocupación Diaria (Censo)</h3>
               <div className="h-80">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={report.dailyStats}>
@@ -265,8 +287,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ report }) => {
                    <th className="px-6 py-3">Cama</th>
                    <th className="px-6 py-3">Ingreso</th>
                    <th className="px-6 py-3">Fecha Egreso</th>
-                   <th className="px-6 py-3 text-center bg-blue-50">Días Mes</th>
-                   <th className="px-6 py-3 text-center">Estadía Total</th>
+                   <th className="px-6 py-3 text-center bg-blue-50" title="Días consumidos en este periodo específico">Días (Periodo)</th>
+                   <th className="px-6 py-3 text-center" title="Duración total del evento clínico (ingreso a egreso)">Estadía (Total)</th>
                    <th className="px-6 py-3">Estado</th>
                  </tr>
                </thead>
@@ -394,15 +416,27 @@ interface KpiCardProps {
   sub: string;
   onClick?: () => void;
   className?: string;
+  tooltip?: string;
 }
 
-const KpiCard: React.FC<KpiCardProps> = ({ icon, title, value, sub, onClick, className }) => (
+const KpiCard: React.FC<KpiCardProps> = ({ icon, title, value, sub, onClick, className, tooltip }) => (
   <div 
     onClick={onClick}
-    className={`bg-white p-5 rounded-xl border border-gray-200 shadow-sm flex items-start justify-between min-w-[200px] ${className || ''}`}
+    className={`bg-white p-5 rounded-xl border border-gray-200 shadow-sm flex items-start justify-between min-w-[200px] relative group ${className || ''}`}
   >
     <div>
-      <p className="text-sm font-medium text-gray-500 mb-1">{title}</p>
+      <div className="flex items-center gap-1 mb-1">
+        <p className="text-sm font-medium text-gray-500">{title}</p>
+        {tooltip && (
+          <div className="group/tip relative">
+             <Info size={12} className="text-gray-400 cursor-help" />
+             <div className="invisible group-hover/tip:visible absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 p-2 bg-slate-800 text-white text-xs rounded z-20 pointer-events-none">
+               {tooltip}
+               <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-800"></div>
+             </div>
+          </div>
+        )}
+      </div>
       <h4 className="text-2xl font-bold text-gray-900">{value}</h4>
       <p className="text-xs text-gray-400 mt-1">{sub}</p>
     </div>

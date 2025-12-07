@@ -244,11 +244,34 @@ export const parseExcelToSnapshots = async (file: File): Promise<PatientSnapshot
                     if (nameCheck.includes('CAMA') || nameCheck.includes('TIPO DE CAMA')) continue;
 
                     const nameNorm = normalizeName(String(nameRaw || ''));
-                    // Skip blocked beds
-                    if (nameNorm.startsWith('BLOQUEO') || nameNorm.includes('BLOQUEO CAMA') || nameNorm.includes('AISLAMIENTO')) continue;
+                    
+                    // --- SKIP BLOCKED/EMPTY BEDS ---
+                    if (
+                        nameNorm.includes('BLOQUE') || // Covers BLOQUEO, BLOQUEADA, BLOQUEADO
+                        nameNorm.includes('IAAS') ||
+                        nameNorm.includes('INFRAESTRUCTURA') ||
+                        nameNorm.includes('FUERA DE SERVICIO') ||
+                        nameNorm.includes('AISLAMIENTO') ||
+                        nameNorm.includes('VACANTE') ||
+                        nameNorm.includes('DISPONIBLE') ||
+                        nameNorm.includes('RESERVADO') ||
+                        nameNorm.includes('ASEO')
+                    ) {
+                        continue;
+                    }
+
                     if (!nameNorm) continue;
 
                     const rutClean = cleanRut(rutRaw);
+                    const hasValidRut = rutClean.length > 1; 
+                    const hasValidDiag = diagRaw && diagRaw.length > 1;
+
+                    // --- REGLA ESTRICTA DE VALIDEZ ---
+                    // Un paciente DEBE tener al menos RUT o DIAGNÓSTICO.
+                    // Esto elimina filas como "Cama Disponible" o "Medico de Turno" que podrían tener texto en la columna nombre pero no son pacientes.
+                    if (!hasValidRut && !hasValidDiag) {
+                        continue;
+                    }
                     
                     let rawBedType = row[colMap['BEDTYPE']] ? String(row[colMap['BEDTYPE']]).trim().toUpperCase() : 'INDEFINIDO';
                     if (rawBedType === 'C.M.A' || rawBedType === 'C.M.A.' || rawBedType.includes('MAYOR AMBULATORIA')) rawBedType = 'CMA';
